@@ -119,7 +119,7 @@ def _image_detail_instruction(detail):
     raise UnsupportedFeatureError("Unsupported Responses API feature: input_image.detail is not supported")
 
 
-def _builtin_tool_input_schema(tool_type):
+def _builtin_tool_input_schema(tool_type, environment=None):
     if tool_type == "apply_patch":
         return {
             "type": "object",
@@ -130,7 +130,7 @@ def _builtin_tool_input_schema(tool_type):
             "additionalProperties": False,
         }
     if tool_type == "shell":
-        return {
+        schema = {
             "type": "object",
             "properties": {
                 "action": {
@@ -148,6 +148,10 @@ def _builtin_tool_input_schema(tool_type):
             "required": ["action"],
             "additionalProperties": False,
         }
+        environment = _normalize_shell_environment(environment)
+        if environment is not None:
+            schema["properties"]["environment"]["default"] = environment
+        return schema
     raise UnsupportedFeatureError(f"Unsupported Responses API tool type: {tool_type}")
 
 
@@ -303,10 +307,6 @@ def _translate_tool_result_content(value):
 
 def _builtin_tool_description(tool_type, description, environment=None):
     description = description or ""
-    if tool_type != "shell":
-        return description
-    if environment is not None:
-        raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
     return description
 
 
@@ -347,15 +347,16 @@ def _translate_tools(tools):
             )
             continue
         if tool_type in {"apply_patch", "shell"}:
+            environment = tool.get("environment")
             translated.append(
                 {
                     "name": tool_name,
                     "description": _builtin_tool_description(
                         tool_type,
                         tool.get("description") or tool.get("function", {}).get("description", ""),
-                        tool.get("environment"),
+                        environment,
                     ),
-                    "input_schema": _builtin_tool_input_schema(tool_type),
+                    "input_schema": _builtin_tool_input_schema(tool_type, environment=environment),
                 }
             )
             continue
@@ -440,6 +441,27 @@ def _tool_type_lookup(response_context):
     return lookup
 
 
+def _tool_definition_lookup(response_context):
+    lookup = {}
+    if not isinstance(response_context, dict):
+        return lookup
+    for tool in response_context.get("tools", []):
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name") or tool.get("function", {}).get("name", "")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        lookup[name.strip()] = tool
+    return lookup
+
+
+def _default_shell_environment(name, response_context=None):
+    tool = _tool_definition_lookup(response_context).get(name)
+    if not isinstance(tool, dict) or tool.get("type") != "shell":
+        return None
+    return _normalize_shell_environment(tool.get("environment"))
+
+
 def _tool_payload_object(payload):
     if isinstance(payload, dict):
         return payload
@@ -479,6 +501,83 @@ def _normalize_shell_action(action, payload=None):
     return normalized
 
 
+def _normalize_reasoning_config(reasoning):
+    if not isinstance(reasoning, dict):
+        return {"effort": None, "summary": None}
+    summary = reasoning.get("summary")
+    generate_summary = reasoning.get("generate_summary")
+    if summary not in SUPPORTED_REASONING_SUMMARIES:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning.summary is not supported")
+    if generate_summary not in SUPPORTED_REASONING_SUMMARIES:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning.generate_summary is not supported")
+    normalized_summary = summary if summary is not None else generate_summary
+    normalized = {
+        "effort": reasoning.get("effort"),
+        "summary": normalized_summary,
+    }
+    if generate_summary is not None:
+        normalized["generate_summary"] = generate_summary
+    return normalized
+
+
+def _output_text_logprobs(response_context=None):
+    if isinstance(response_context, dict) and response_context.get("top_logprobs") == 0:
+        return []
+    return None
+
+
+def _output_text_part(text, response_context=None):
+    part = {
+        "type": "output_text",
+        "text": text,
+        "annotations": [],
+    }
+    logprobs = _output_text_logprobs(response_context)
+    if logprobs is not None:
+        part["logprobs"] = logprobs
+    return part
+
+
+def _text_done_payload(item_id, output_index, text, response_context=None):
+    payload = {
+        "type": "response.output_text.done",
+        "item_id": item_id,
+        "output_index": output_index,
+        "content_index": 0,
+        "text": text,
+    }
+    logprobs = _output_text_logprobs(response_context)
+    if logprobs is not None:
+        payload["logprobs"] = logprobs
+    return payload
+
+
+def _text_delta_payload(item_id, output_index, delta_text, response_context=None):
+    payload = {
+        "type": "response.output_text.delta",
+        "item_id": item_id,
+        "output_index": output_index,
+        "content_index": 0,
+        "delta": delta_text,
+    }
+    logprobs = _output_text_logprobs(response_context)
+    if logprobs is not None:
+        payload["logprobs"] = logprobs
+    return payload
+
+
+def _apply_assistant_phase(content_blocks, phase):
+    if phase != "commentary":
+        return content_blocks
+    phased_blocks = []
+    for block in content_blocks:
+        if block.get("type") == "text":
+            phased_blocks.append({"type": "thinking", "thinking": block.get("text", "")})
+        else:
+            phased_blocks.append(block)
+    return phased_blocks
+
+
 def _tool_item_payload(call_id, name, payload, status, response_context=None):
     item_type = _tool_type_lookup(response_context).get(name)
     if item_type is None:
@@ -504,12 +603,30 @@ def _tool_item_payload(call_id, name, payload, status, response_context=None):
         payload_obj = _tool_payload_object(payload)
         item["action"] = _normalize_shell_action(payload_obj.get("action"), payload_obj)
         environment = _normalize_shell_environment(payload_obj.get("environment"))
+        if environment is None:
+            environment = _default_shell_environment(name, response_context=response_context)
         if environment is not None:
             item["environment"] = environment
         return item
     item["name"] = name
     item["arguments"] = payload
     return item
+
+
+def _serialized_tool_payload(name, payload, response_context=None):
+    item_type = _tool_type_lookup(response_context).get(name)
+    if item_type is None:
+        item_type = _builtin_tool_type_for_name(name) or "function_call"
+    if item_type != "shell_call":
+        return payload
+    payload_obj = _tool_payload_object(payload)
+    if "environment" in payload_obj:
+        return payload
+    environment = _default_shell_environment(name, response_context=response_context)
+    if environment is None:
+        return payload
+    payload_obj["environment"] = environment
+    return json.dumps(payload_obj, ensure_ascii=False)
 
 
 def _usage_payload(usage):
@@ -540,20 +657,6 @@ def _reasoning_encrypted_content(block, response_context=None):
     return None
 
 
-def _should_include_reasoning_encrypted_content(response_context=None):
-    include = []
-    if isinstance(response_context, dict):
-        include = response_context.get("include", [])
-    return "reasoning.encrypted_content" in include
-
-
-def _generated_reasoning_encrypted_content(text):
-    if not isinstance(text, str) or not text:
-        return None
-    encoded = base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii").rstrip("=")
-    return f"minimax:{encoded}"
-
-
 def _reasoning_summary_text(text, response_context=None):
     if not isinstance(text, str):
         return ""
@@ -561,7 +664,7 @@ def _reasoning_summary_text(text, response_context=None):
     if isinstance(response_context, dict):
         reasoning = response_context.get("reasoning")
         if isinstance(reasoning, dict):
-            summary_mode = reasoning.get("summary")
+            summary_mode = reasoning.get("summary", reasoning.get("generate_summary"))
     if summary_mode in {None, "auto", "detailed"}:
         return text
     if summary_mode == "concise":
@@ -682,10 +785,50 @@ def _tool_stream_event_spec(call, response_context=None):
 
 def _validate_builtin_tool_output_item(item):
     item_type = item.get("type")
-    if item_type not in {"apply_patch_call_output", "shell_call_output"}:
-        return
+    status = item.get("status")
+    if item_type == "apply_patch_call_output" and status not in {None, "completed", "failed"}:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: tool call output status is not supported")
+    if item_type == "shell_call_output" and status not in {None, "in_progress", "completed", "incomplete", "failed"}:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: tool call output status is not supported")
+
+
+def _builtin_tool_output_content(item):
+    item_type = item.get("type")
+    output = item.get("output", "")
+    metadata = {}
     if item.get("id") is not None:
-        raise UnsupportedFeatureError("Unsupported Responses API feature: tool call output id is not supported")
+        metadata["id"] = item["id"]
+    if item.get("status") is not None:
+        metadata["status"] = item["status"]
+    if item_type == "shell_call_output" and item.get("max_output_length") is not None:
+        metadata["max_output_length"] = item["max_output_length"]
+    if metadata or (item_type == "shell_call_output" and isinstance(output, list)):
+        payload = dict(metadata)
+        payload["output"] = output
+        return json.dumps(payload, ensure_ascii=False)
+    return _translate_tool_result_content(output)
+
+
+def _builtin_tool_output_is_error(item):
+    if item.get("is_error") is True or item.get("status") == "failed":
+        return True
+    if item.get("type") != "shell_call_output":
+        return False
+    output = item.get("output")
+    if not isinstance(output, list):
+        return False
+    for chunk in output:
+        if not isinstance(chunk, dict):
+            continue
+        outcome = chunk.get("outcome")
+        if not isinstance(outcome, dict):
+            continue
+        outcome_type = outcome.get("type")
+        if outcome_type == "timeout":
+            return True
+        if outcome_type == "exit" and outcome.get("exit_code") not in (None, 0):
+            return True
+    return False
 
 
 def build_response_context(body, model=None):
@@ -697,16 +840,7 @@ def build_response_context(body, model=None):
         else:
             text_config = {"format": {"type": "text"}}
 
-    reasoning = body.get("reasoning")
-    if not isinstance(reasoning, dict):
-        reasoning = {"effort": None, "summary": None}
-    summary = reasoning.get("summary")
-    if summary not in SUPPORTED_REASONING_SUMMARIES:
-        raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning.summary is not supported")
-    reasoning = {
-        "effort": reasoning.get("effort"),
-        "summary": summary,
-    }
+    reasoning = _normalize_reasoning_config(body.get("reasoning"))
 
     return {
         "model": model or body.get("model"),
@@ -794,8 +928,7 @@ def _thinking_from_reasoning(body, max_tokens):
     if not isinstance(reasoning, dict):
         return None
 
-    if reasoning.get("summary") not in SUPPORTED_REASONING_SUMMARIES:
-        raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning.summary is not supported")
+    reasoning = _normalize_reasoning_config(reasoning)
 
     effort = (reasoning.get("effort") or "").lower()
     if effort in {"", "none"}:
@@ -1045,10 +1178,6 @@ def translate_responses_request(body):
                 raise UnsupportedFeatureError("Unsupported Responses API feature: message phase is not supported")
             if phase is not None and role != "assistant":
                 raise UnsupportedFeatureError("Unsupported Responses API feature: message phase is only supported for assistant messages")
-            if phase is not None:
-                raise UnsupportedFeatureError(
-                    "Unsupported Responses API feature: assistant message phase cannot be preserved for MiniMax"
-                )
             if role in {"developer", "system"}:
                 developer_blocks = _translate_content_blocks(item.get("content", []))
                 if any(block.get("type") != "text" for block in developer_blocks):
@@ -1060,6 +1189,8 @@ def translate_responses_request(body):
                     system_segments.append(developer_text)
                 continue
             translated_content = _translate_content_blocks(item.get("content", []))
+            if role == "assistant":
+                translated_content = _apply_assistant_phase(translated_content, phase)
             result["messages"].append({"role": role, "content": translated_content})
             continue
 
@@ -1111,15 +1242,22 @@ def translate_responses_request(body):
             if not call_id:
                 continue
             _validate_builtin_tool_output_item(item)
+            content = (
+                _builtin_tool_output_content(item)
+                if item_type in {"apply_patch_call_output", "shell_call_output"}
+                else _translate_tool_result_content(item.get("output", ""))
+            )
             tool_result = {
                 "type": "tool_result",
                 "tool_use_id": call_id,
-                "content": _translate_tool_result_content(item.get("output", "")),
+                "content": content,
             }
             output_status = item.get("status")
-            if output_status not in {None, "completed", "failed"}:
+            if item_type not in {"apply_patch_call_output", "shell_call_output"} and output_status not in {None, "completed", "failed"}:
                 raise UnsupportedFeatureError("Unsupported Responses API feature: tool call output status is not supported")
-            if output_status == "failed" or item.get("is_error") is True:
+            if (
+                item_type in {"apply_patch_call_output", "shell_call_output"} and _builtin_tool_output_is_error(item)
+            ) or output_status == "failed" or item.get("is_error") is True:
                 tool_result["is_error"] = True
             pending_tool_result_blocks.append(tool_result)
             continue
@@ -1184,8 +1322,6 @@ def translate_anthropic_response(body, model, response_context=None):
             content_text = block.get("thinking") or block.get("text") or ""
             summary_text = _reasoning_summary_text(content_text, response_context=response_context)
             encrypted_content = _reasoning_encrypted_content(block, response_context=response_context)
-            if encrypted_content is None and _should_include_reasoning_encrypted_content(response_context):
-                encrypted_content = _generated_reasoning_encrypted_content(content_text)
             output.append(
                 _reasoning_item_payload(
                     f"rs_{response_id}_{index}",
@@ -1205,14 +1341,7 @@ def translate_anthropic_response(body, model, response_context=None):
                     "role": "assistant",
                     "phase": "final_answer",
                     "status": message_status,
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": text,
-                            "annotations": [],
-                            "logprobs": [],
-                        }
-                    ],
+                    "content": [_output_text_part(text, response_context=response_context)],
                 }
             )
         elif block_type == "tool_use":
@@ -1322,8 +1451,6 @@ class ResponsesEventTranslator:
                 _reasoning_summary_text(full_text, response_context=self.response_context),
             )
             encrypted_content = self.reasoning_encrypted.get(assistant_index)
-            if encrypted_content is None and _should_include_reasoning_encrypted_content(self.response_context):
-                encrypted_content = _generated_reasoning_encrypted_content(full_text)
             items.append(
                 _reasoning_item_payload(
                     f"rs_{self.response_id}_{assistant_index}",
@@ -1346,20 +1473,14 @@ class ResponsesEventTranslator:
                     "role": "assistant",
                     "phase": "final_answer",
                     "status": self._final_message_status() if assistant_index in self.message_done else "in_progress",
-                    "content": [
-                        {
-                            "type": "output_text",
-                            "text": text,
-                            "annotations": [],
-                            "logprobs": [],
-                        }
-                    ],
+                    "content": [_output_text_part(text, response_context=self.response_context)],
                 }
             )
         for index in sorted(self.tool_calls):
             call = self.tool_calls[index]
             call_id = call["call_id"]
             args = self.tool_args.get(index, "") or self.tool_seed_args.get(index, "{}")
+            args = _serialized_tool_payload(call["name"], args, response_context=self.response_context)
             items.append(
                 _tool_item_payload(
                     call_id,
@@ -1472,7 +1593,7 @@ class ResponsesEventTranslator:
                         "item_id": msg_id,
                         "output_index": index,
                         "content_index": 0,
-                        "part": {"type": "output_text", "text": "", "annotations": [], "logprobs": []},
+                        "part": _output_text_part("", response_context=self.response_context),
                     },
                 )
             )
@@ -1488,14 +1609,7 @@ class ResponsesEventTranslator:
         return [
             self._emit(
                 "response.output_text.done",
-                {
-                    "type": "response.output_text.done",
-                    "item_id": msg_id,
-                    "output_index": index,
-                    "content_index": 0,
-                    "text": text,
-                    "logprobs": [],
-                },
+                _text_done_payload(msg_id, index, text, response_context=self.response_context),
             ),
             self._emit(
                 "response.content_part.done",
@@ -1504,7 +1618,7 @@ class ResponsesEventTranslator:
                     "item_id": msg_id,
                     "output_index": index,
                     "content_index": 0,
-                    "part": {"type": "output_text", "text": text, "annotations": [], "logprobs": []},
+                    "part": _output_text_part(text, response_context=self.response_context),
                 },
             ),
             self._emit(
@@ -1518,14 +1632,7 @@ class ResponsesEventTranslator:
                             "role": "assistant",
                             "phase": "final_answer",
                             "status": self._final_message_status(),
-                            "content": [
-                            {
-                                "type": "output_text",
-                                "text": text,
-                                "annotations": [],
-                                "logprobs": [],
-                            }
-                        ],
+                            "content": [_output_text_part(text, response_context=self.response_context)],
                     },
                 },
             ),
@@ -1574,8 +1681,6 @@ class ResponsesEventTranslator:
             _reasoning_summary_text(full_text, response_context=self.response_context),
         )
         encrypted_content = self.reasoning_encrypted.get(index)
-        if encrypted_content is None and _should_include_reasoning_encrypted_content(self.response_context):
-            encrypted_content = _generated_reasoning_encrypted_content(full_text)
         return [
             self._emit(
                 "response.reasoning_summary_text.done",
@@ -1620,6 +1725,7 @@ class ResponsesEventTranslator:
         call = self.tool_calls[index]
         call_id = call["call_id"]
         args = self.tool_args.get(index, "") or self.tool_seed_args.get(index, "{}")
+        args = _serialized_tool_payload(call["name"], args, response_context=self.response_context)
         event_spec = _tool_stream_event_spec(call, response_context=self.response_context)
         final_value = _unwrap_custom_tool_payload(args) if event_spec["field_name"] == "input" else args
         return [
@@ -1730,14 +1836,12 @@ class ResponsesEventTranslator:
                     self._emit(
                         "response.output_text.delta",
                         self._delta_payload(
-                            {
-                            "type": "response.output_text.delta",
-                            "item_id": self._message_id(index),
-                            "output_index": index,
-                            "content_index": 0,
-                            "delta": text,
-                            "logprobs": [],
-                            }
+                            _text_delta_payload(
+                                self._message_id(index),
+                                index,
+                                text,
+                                response_context=self.response_context,
+                            )
                         ),
                     )
                 )

@@ -193,7 +193,7 @@ def test_translate_anthropic_thinking_block_emits_reasoning_encrypted_content_wh
     assert completed["data"]["response"]["output"][0]["encrypted_content"] == "enc_sig_456"
 
 
-def test_translate_anthropic_thinking_block_generates_reasoning_encrypted_content_when_missing_upstream_field():
+def test_translate_anthropic_thinking_block_omits_reasoning_encrypted_content_when_missing_upstream_field():
     translator = ResponsesEventTranslator(
         response_context={"include": ["reasoning.encrypted_content"]},
     )
@@ -224,8 +224,7 @@ def test_translate_anthropic_thinking_block_generates_reasoning_encrypted_conten
         if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "reasoning"
     )
 
-    assert isinstance(done["data"]["item"]["encrypted_content"], str)
-    assert done["data"]["item"]["encrypted_content"]
+    assert "encrypted_content" not in done["data"]["item"]
 
 
 def test_translate_anthropic_reasoning_and_text_share_same_output_index():
@@ -541,6 +540,62 @@ def test_translate_anthropic_shell_stream_preserves_environment_and_argument_pay
     }
 
 
+def test_translate_anthropic_shell_stream_falls_back_to_tool_environment_definition():
+    translator = ResponsesEventTranslator(
+        response_context={
+            "tools": [
+                {
+                    "type": "shell",
+                    "name": "shell",
+                    "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+                }
+            ]
+        },
+    )
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "call_shell",
+                "name": "shell",
+                "input": {
+                    "action": {"commands": ["pwd"]},
+                },
+            },
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["call_id"] == "call_shell"
+    )
+    output_item = next(
+        item
+        for item in next(event for event in events if event["event"] == "response.completed")["data"]["response"]["output"]
+        if item["call_id"] == "call_shell"
+    )
+
+    assert done["data"]["item"]["environment"] == {
+        "type": "local",
+        "skills": [{"name": "python", "path": "/tmp/python"}],
+    }
+    assert output_item["environment"] == {
+        "type": "local",
+        "skills": [{"name": "python", "path": "/tmp/python"}],
+    }
+
+
 def test_translate_anthropic_tool_use_with_start_input_closes_with_full_arguments():
     translator = ResponsesEventTranslator()
     events = []
@@ -629,6 +684,66 @@ def test_translate_anthropic_stream_completed_includes_usage_details():
 
     assert completed["data"]["response"]["usage"]["input_tokens_details"] == {"cached_tokens": 0}
     assert completed["data"]["response"]["usage"]["output_tokens_details"] == {"reasoning_tokens": 0}
+
+
+def test_translate_anthropic_stream_omits_logprobs_when_not_requested():
+    translator = ResponsesEventTranslator()
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hello"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    part_added = next(event for event in events if event["event"] == "response.content_part.added")
+    text_done = next(event for event in events if event["event"] == "response.output_text.done")
+
+    assert "logprobs" not in part_added["data"]["part"]
+    assert "logprobs" not in text_done["data"]
+
+
+def test_translate_anthropic_stream_includes_empty_logprobs_when_zero_requested():
+    translator = ResponsesEventTranslator(response_context={"top_logprobs": 0})
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hello"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    part_added = next(event for event in events if event["event"] == "response.content_part.added")
+    text_done = next(event for event in events if event["event"] == "response.output_text.done")
+
+    assert part_added["data"]["part"]["logprobs"] == []
+    assert text_done["data"]["logprobs"] == []
 
 
 def test_translate_anthropic_stream_marks_max_tokens_stop_as_incomplete():

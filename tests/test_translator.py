@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.translator import (
@@ -224,17 +226,40 @@ def test_translate_responses_request_rejects_invalid_message_phase():
         )
 
 
-def test_translate_responses_request_rejects_assistant_message_phase():
-    with pytest.raises(UnsupportedFeatureError, match="message phase"):
+def test_translate_responses_request_preserves_assistant_commentary_phase_best_effort():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "Plan the edit first"}],
+                }
+            ],
+        }
+    )
+
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [{"type": "thinking", "thinking": "Plan the edit first"}],
+        }
+    ]
+
+
+def test_translate_responses_request_rejects_non_assistant_message_phase():
+    with pytest.raises(UnsupportedFeatureError, match="phase"):
         translate_responses_request(
             {
                 "model": "codex-MiniMax-M2.7",
                 "input": [
                     {
                         "type": "message",
-                        "role": "assistant",
-                        "phase": "final_answer",
-                        "content": [{"type": "output_text", "text": "Done"}],
+                        "role": "user",
+                        "phase": "commentary",
+                        "content": [{"type": "input_text", "text": "hello"}],
                     }
                 ],
             }
@@ -591,22 +616,49 @@ def test_translate_responses_request_accepts_shell_call_output_items():
     ]
 
 
-def test_translate_responses_request_rejects_shell_tool_environment():
-    with pytest.raises(UnsupportedFeatureError, match="shell environment"):
-        translate_responses_request(
-            {
-                "model": "codex-MiniMax-M2.7",
-                "tools": [
-                    {
-                        "type": "shell",
-                        "name": "shell",
-                        "description": "Run shell commands",
-                        "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
-                    }
-                ],
-                "input": "hello",
-            }
-        )
+def test_translate_responses_request_supports_shell_tool_environment():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "tools": [
+                {
+                    "type": "shell",
+                    "name": "shell",
+                    "description": "Run shell commands",
+                    "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+                }
+            ],
+            "input": "hello",
+        }
+    )
+
+    assert translated["tools"] == [
+        {
+            "name": "shell",
+            "description": "Run shell commands",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "object",
+                        "properties": {
+                            "commands": {"type": "array", "items": {"type": "string"}},
+                            "timeout_ms": {"type": "integer"},
+                            "max_output_length": {"type": "integer"},
+                        },
+                        "required": ["commands"],
+                        "additionalProperties": False,
+                    },
+                    "environment": {
+                        "type": "object",
+                        "default": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+                    },
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        }
+    ]
 
 
 def test_translate_responses_request_preserves_shell_call_environment():
@@ -666,36 +718,43 @@ def test_translate_responses_request_maps_failed_apply_patch_call_output_to_erro
 
     translated = translate_responses_request(request_body)
 
-    assert translated["messages"][1]["content"] == [
+    tool_result = translated["messages"][1]["content"][0]
+
+    assert tool_result["type"] == "tool_result"
+    assert tool_result["tool_use_id"] == "call_patch"
+    assert tool_result["is_error"] is True
+    assert json.loads(tool_result["content"]) == {"status": "failed", "output": "patch failed"}
+
+
+def test_translate_responses_request_preserves_apply_patch_call_output_metadata():
+    translated = translate_responses_request(
         {
-            "type": "tool_result",
-            "tool_use_id": "call_patch",
-            "content": "patch failed",
-            "is_error": True,
+            "model": "codex-MiniMax-M2.7",
+            "input": [
+                {
+                    "type": "apply_patch_call",
+                    "call_id": "call_patch",
+                    "operation": {"type": "update_file", "path": "README.md", "diff": "*** Begin Patch\n*** End Patch\n"},
+                },
+                {
+                    "type": "apply_patch_call_output",
+                    "id": "apo_123",
+                    "call_id": "call_patch",
+                    "status": "completed",
+                    "output": "patch applied",
+                },
+            ],
         }
-    ]
+    )
 
+    tool_result = translated["messages"][1]["content"][0]
 
-def test_translate_responses_request_rejects_apply_patch_call_output_id():
-    with pytest.raises(UnsupportedFeatureError, match="tool call output id"):
-        translate_responses_request(
-            {
-                "model": "codex-MiniMax-M2.7",
-                "input": [
-                    {
-                        "type": "apply_patch_call",
-                        "call_id": "call_patch",
-                        "operation": {"type": "update_file", "path": "README.md", "diff": "*** Begin Patch\n*** End Patch\n"},
-                    },
-                    {
-                        "type": "apply_patch_call_output",
-                        "id": "apo_123",
-                        "call_id": "call_patch",
-                        "output": "patch applied",
-                    },
-                ],
-            }
-        )
+    assert tool_result["tool_use_id"] == "call_patch"
+    assert json.loads(tool_result["content"]) == {
+        "id": "apo_123",
+        "status": "completed",
+        "output": "patch applied",
+    }
 
 
 def test_translate_responses_request_maps_failed_shell_call_output_to_error_tool_result():
@@ -718,36 +777,98 @@ def test_translate_responses_request_maps_failed_shell_call_output_to_error_tool
 
     translated = translate_responses_request(request_body)
 
-    assert translated["messages"][1]["content"] == [
+    tool_result = translated["messages"][1]["content"][0]
+
+    assert tool_result["type"] == "tool_result"
+    assert tool_result["tool_use_id"] == "call_shell"
+    assert tool_result["is_error"] is True
+    assert json.loads(tool_result["content"]) == {"status": "failed", "output": "permission denied"}
+
+
+def test_translate_responses_request_preserves_shell_call_output_metadata_and_chunks():
+    translated = translate_responses_request(
         {
-            "type": "tool_result",
-            "tool_use_id": "call_shell",
-            "content": "permission denied",
-            "is_error": True,
+            "model": "codex-MiniMax-M2.7",
+            "input": [
+                {
+                    "type": "shell_call",
+                    "call_id": "call_shell",
+                    "action": {"commands": ["pwd"]},
+                },
+                {
+                    "type": "shell_call_output",
+                    "id": "sho_123",
+                    "call_id": "call_shell",
+                    "status": "completed",
+                    "max_output_length": 4096,
+                    "output": [
+                        {
+                            "stdout": "/root/minimaxdemo\n",
+                            "stderr": "",
+                            "outcome": {"type": "exit", "exit_code": 0},
+                        }
+                    ],
+                },
+            ],
         }
-    ]
+    )
 
+    tool_result = translated["messages"][1]["content"][0]
 
-def test_translate_responses_request_rejects_shell_call_output_id():
-    with pytest.raises(UnsupportedFeatureError, match="tool call output id"):
-        translate_responses_request(
+    assert tool_result["tool_use_id"] == "call_shell"
+    assert json.loads(tool_result["content"]) == {
+        "id": "sho_123",
+        "status": "completed",
+        "max_output_length": 4096,
+        "output": [
             {
-                "model": "codex-MiniMax-M2.7",
-                "input": [
-                    {
-                        "type": "shell_call",
-                        "call_id": "call_shell",
-                        "action": {"commands": ["pwd"]},
-                    },
-                    {
-                        "type": "shell_call_output",
-                        "id": "sho_123",
-                        "call_id": "call_shell",
-                        "output": "ok",
-                    },
-                ],
+                "stdout": "/root/minimaxdemo\n",
+                "stderr": "",
+                "outcome": {"type": "exit", "exit_code": 0},
             }
-        )
+        ],
+    }
+
+
+def test_translate_responses_request_maps_nonzero_shell_exit_to_error_tool_result():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": [
+                {
+                    "type": "shell_call",
+                    "call_id": "call_shell",
+                    "action": {"commands": ["false"]},
+                },
+                {
+                    "type": "shell_call_output",
+                    "call_id": "call_shell",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "stdout": "",
+                            "stderr": "permission denied\n",
+                            "outcome": {"type": "exit", "exit_code": 1},
+                        }
+                    ],
+                },
+            ],
+        }
+    )
+
+    tool_result = translated["messages"][1]["content"][0]
+
+    assert tool_result["is_error"] is True
+    assert json.loads(tool_result["content"]) == {
+        "status": "completed",
+        "output": [
+            {
+                "stdout": "",
+                "stderr": "permission denied\n",
+                "outcome": {"type": "exit", "exit_code": 1},
+            }
+        ],
+    }
 
 
 def test_translate_responses_request_filters_orphan_tool_results():
@@ -952,6 +1073,48 @@ def test_translate_anthropic_response_maps_shell_environment_to_builtin_call():
     ]
 
 
+def test_translate_anthropic_response_falls_back_to_shell_tool_environment_definition():
+    body = {
+        "id": "msg_tool",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "call_shell",
+                "name": "shell",
+                "input": {
+                    "action": {"commands": ["pwd"]},
+                },
+            },
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    translated = translate_anthropic_response(
+        body,
+        "codex-MiniMax-M2.7",
+        response_context={
+            "tools": [
+                {
+                    "type": "shell",
+                    "name": "shell",
+                    "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+                }
+            ]
+        },
+    )
+
+    assert translated["output"] == [
+        {
+            "id": "fc_call_shell",
+            "type": "shell_call",
+            "call_id": "call_shell",
+            "action": {"commands": ["pwd"]},
+            "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+            "status": "completed",
+        }
+    ]
+
+
 def test_translate_anthropic_response_marks_message_phase_and_incomplete_details():
     translated = translate_anthropic_response(
         {
@@ -1022,7 +1185,7 @@ def test_translate_anthropic_response_includes_reasoning_encrypted_content_when_
     ]
 
 
-def test_translate_anthropic_response_generates_reasoning_encrypted_content_when_missing_upstream_field():
+def test_translate_anthropic_response_omits_reasoning_encrypted_content_when_upstream_missing():
     body = {
         "id": "msg_reasoning",
         "content": [
@@ -1040,8 +1203,7 @@ def test_translate_anthropic_response_generates_reasoning_encrypted_content_when
     reasoning_item = translated["output"][0]
 
     assert reasoning_item["type"] == "reasoning"
-    assert isinstance(reasoning_item["encrypted_content"], str)
-    assert reasoning_item["encrypted_content"]
+    assert "encrypted_content" not in reasoning_item
 
 
 def test_translate_anthropic_response_includes_request_context_fields():
@@ -1105,6 +1267,46 @@ def test_build_response_context_sets_default_function_tool_strict_true():
     ]
 
 
+def test_translate_responses_request_accepts_deprecated_reasoning_generate_summary():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "max_output_tokens": 4000,
+            "reasoning": {"effort": "high", "generate_summary": "concise"},
+        }
+    )
+
+    response_context = build_response_context(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "reasoning": {"effort": "high", "generate_summary": "concise"},
+        }
+    )
+
+    assert translated["thinking"] == {"type": "enabled", "budget_tokens": 3200}
+    assert response_context["reasoning"] == {
+        "effort": "high",
+        "generate_summary": "concise",
+        "summary": "concise",
+    }
+
+
+def test_translate_anthropic_response_shapes_reasoning_summary_when_generate_summary_requested():
+    translated = translate_anthropic_response(
+        {
+            "id": "msg_reasoning",
+            "content": [{"type": "thinking", "thinking": "First sentence. Second sentence with more detail."}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+        "codex-MiniMax-M2.7",
+        response_context={"reasoning": {"effort": "high", "generate_summary": "concise", "summary": "concise"}},
+    )
+
+    assert translated["output"][0]["summary"] == [{"type": "summary_text", "text": "First sentence."}]
+
+
 def test_translate_responses_request_accepts_reasoning_encrypted_content_include():
     translated = translate_responses_request(
         {
@@ -1164,15 +1366,42 @@ def test_translate_responses_request_rejects_unsupported_official_fields(field_n
         translate_responses_request(body)
 
 
-def test_translate_responses_request_rejects_unknown_include_values():
+def test_translate_responses_request_rejects_unsupported_logprobs_include():
     with pytest.raises(UnsupportedFeatureError, match="include"):
         translate_responses_request(
             {
                 "model": "codex-MiniMax-M2.7",
                 "input": "hello",
-                "include": ["output_text.logprobs"],
+                "include": ["message.output_text.logprobs"],
             }
         )
+
+
+def test_translate_anthropic_response_omits_logprobs_when_not_requested():
+    translated = translate_anthropic_response(
+        {
+            "id": "msg_text",
+            "content": [{"type": "text", "text": "Hello"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+        "codex-MiniMax-M2.7",
+    )
+
+    assert "logprobs" not in translated["output"][0]["content"][0]
+
+
+def test_translate_anthropic_response_includes_empty_logprobs_when_zero_requested():
+    translated = translate_anthropic_response(
+        {
+            "id": "msg_text",
+            "content": [{"type": "text", "text": "Hello"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+        "codex-MiniMax-M2.7",
+        response_context={"top_logprobs": 0},
+    )
+
+    assert translated["output"][0]["content"][0]["logprobs"] == []
 
 
 def test_translate_anthropic_response_rejects_multiple_tool_calls_when_parallel_disabled():
