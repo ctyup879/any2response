@@ -79,7 +79,7 @@ Currently supported on `/v1/responses`:
 - Text/image/PDF user content blocks:
   - `input_text`
   - `input_image` with `data:` URL or `http(s)` URL
-  - best-effort `input_image.detail` support by injecting per-image low/high detail guidance
+  - `input_image.detail` values other than `auto` are explicitly rejected
   - `input_file` with inline `data:` for text, JSON, images, and PDFs
 - Sampling and output controls:
   - `max_output_tokens`
@@ -89,12 +89,12 @@ Currently supported on `/v1/responses`:
   - `text.format` and legacy `response_format` for JSON-mode instruction injection
   - best-effort `text.verbosity` via injected system guidance
   - `prompt_cache_key` retained in proxy response context
-  - best-effort `include: ["reasoning.encrypted_content"]` when the upstream reasoning block exposes a compatible field
+  - `include: ["reasoning.encrypted_content"]`, with upstream values passed through when available and an opaque proxy-generated fallback otherwise
   - `parallel_tool_calls: false` enforced proxy-side by rejecting upstream turns that contain multiple tool calls
   - `stream_options.include_obfuscation` on streaming delta events
 - Reasoning controls:
   - `reasoning.effort` including `xhigh` mapped approximately onto Anthropic thinking budgets
-  - `reasoning.summary` accepted and preserved in proxy response context
+  - `reasoning.summary`, with proxy-side summary shaping for `concise`
 - Streaming translation for:
   - text deltas
   - reasoning/thinking deltas
@@ -133,12 +133,13 @@ Compatibility notes:
 - function tools with `strict=false` are rejected instead of being silently weakened.
 - function tools omitted `strict` on input are echoed back with the OpenAI default `strict: true`.
 - developer/system messages are text-only; non-text content is rejected instead of being dropped.
-- `include: ["reasoning.encrypted_content"]` is best-effort only: the proxy emits `encrypted_content` when MiniMax reasoning blocks expose a compatible `data` or `signature` field, and otherwise returns a normal reasoning item without that field.
-- `reasoning.summary` is accepted, but MiniMax does not expose a native summary control; the proxy preserves the field without promising exact summary granularity.
+- `include: ["reasoning.encrypted_content"]` now always produces an `encrypted_content` string on reasoning items: upstream `data`/`signature` values are passed through, otherwise the proxy emits an opaque fallback derived from the reasoning text.
+- `reasoning.summary: "concise"` now shapes reasoning summaries proxy-side instead of merely echoing the request field back.
 - built-in `apply_patch` and `shell` calls are modeled with their OpenAI item types on the Responses side, while still being proxied upstream as Anthropic-style tool calls.
-- `shell` tools accept OpenAI-style `environment` config on the Responses side. The proxy forwards `shell_call.environment` structurally and exposes tool-level environment to MiniMax as best-effort descriptive context.
+- `shell_call.environment` is preserved structurally, but top-level `tools[].environment` is explicitly rejected because MiniMax's Anthropic-style tool schema has no faithful equivalent.
 - `shell_call` is normalized to the OpenAI `action` object shape on the Responses side; legacy flat shell payloads are still accepted on input for compatibility.
-- `input_image.detail` is best-effort only because Anthropic-compatible image inputs do not expose an equivalent detail knob.
-- custom tool grammars with `syntax: "regex"` are mapped structurally; `syntax: "lark"` is accepted best-effort by preserving the grammar in tool description text while keeping unconstrained string input.
+- `input_image.detail` values other than `auto` are rejected instead of being approximated through prompt text.
+- custom tool grammars with `syntax: "regex"` are mapped structurally; `syntax: "lark"` is explicitly rejected.
+- built-in tool output replay keeps `status -> is_error`, but unsupported fields like output item `id` are rejected instead of being silently dropped.
 - failed `apply_patch_call_output` and `shell_call_output` items are translated into Anthropic `tool_result` blocks with `is_error: true`.
 - nameless hosted tools from Codex are ignored instead of failing the request, so Codex CLI can continue to operate when it sends local-only tool descriptors the proxy cannot translate upstream.

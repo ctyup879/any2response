@@ -127,6 +127,36 @@ def test_translate_anthropic_thinking_block_to_reasoning_events():
     assert "response.output_item.done" in event_types
 
 
+def test_translate_anthropic_thinking_block_uses_concise_summary_when_requested():
+    translator = ResponsesEventTranslator(
+        response_context={"reasoning": {"effort": "high", "summary": "concise"}},
+    )
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "First sentence. Second sentence with more detail."},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    summary_done = next(event for event in events if event["event"] == "response.reasoning_summary_text.done")
+
+    assert summary_done["data"]["text"] == "First sentence."
+
+
 def test_translate_anthropic_thinking_block_emits_reasoning_encrypted_content_when_requested():
     translator = ResponsesEventTranslator(
         response_context={"include": ["reasoning.encrypted_content"]},
@@ -161,6 +191,41 @@ def test_translate_anthropic_thinking_block_emits_reasoning_encrypted_content_wh
 
     assert done["data"]["item"]["encrypted_content"] == "enc_sig_456"
     assert completed["data"]["response"]["output"][0]["encrypted_content"] == "enc_sig_456"
+
+
+def test_translate_anthropic_thinking_block_generates_reasoning_encrypted_content_when_missing_upstream_field():
+    translator = ResponsesEventTranslator(
+        response_context={"include": ["reasoning.encrypted_content"]},
+    )
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Plan carefully before acting."},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "reasoning"
+    )
+
+    assert isinstance(done["data"]["item"]["encrypted_content"], str)
+    assert done["data"]["item"]["encrypted_content"]
 
 
 def test_translate_anthropic_reasoning_and_text_share_same_output_index():

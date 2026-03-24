@@ -123,37 +123,25 @@ def test_translate_responses_request_supports_custom_tools_with_grammar_format()
     ]
 
 
-def test_translate_responses_request_accepts_lark_custom_tool_format():
-    translated = translate_responses_request(
-        {
-            "model": "codex-MiniMax-M2.7",
-            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
-            "tools": [
-                {
-                    "type": "custom",
-                    "name": "matcher",
-                    "format": {
-                        "type": "grammar",
-                        "syntax": "lark",
-                        "definition": "start: WORD",
-                    },
-                }
-            ],
-        }
-    )
-
-    assert translated["tools"] == [
-        {
-            "name": "matcher",
-            "description": "Input grammar (lark):\nstart: WORD",
-            "input_schema": {
-                "type": "object",
-                "properties": {"input": {"type": "string"}},
-                "required": ["input"],
-                "additionalProperties": False,
-            },
-        }
-    ]
+def test_translate_responses_request_rejects_lark_custom_tool_format():
+    with pytest.raises(UnsupportedFeatureError, match="custom tool format"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                "tools": [
+                    {
+                        "type": "custom",
+                        "name": "matcher",
+                        "format": {
+                            "type": "grammar",
+                            "syntax": "lark",
+                            "definition": "start: WORD",
+                        },
+                    }
+                ],
+            }
+        )
 
 
 def test_translate_responses_request_skips_nameless_hosted_tools():
@@ -603,31 +591,39 @@ def test_translate_responses_request_accepts_shell_call_output_items():
     ]
 
 
-def test_translate_responses_request_preserves_shell_environment():
-    request_body = {
-        "model": "codex-MiniMax-M2.7",
-        "tools": [
+def test_translate_responses_request_rejects_shell_tool_environment():
+    with pytest.raises(UnsupportedFeatureError, match="shell environment"):
+        translate_responses_request(
             {
-                "type": "shell",
-                "name": "shell",
-                "description": "Run shell commands",
-                "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+                "model": "codex-MiniMax-M2.7",
+                "tools": [
+                    {
+                        "type": "shell",
+                        "name": "shell",
+                        "description": "Run shell commands",
+                        "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+                    }
+                ],
+                "input": "hello",
             }
-        ],
-        "input": [
-            {
-                "type": "shell_call",
-                "call_id": "call_shell",
-                "action": {"commands": ["pwd"], "timeout_ms": 1000},
-                "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
-            }
-        ],
-    }
+        )
 
-    translated = translate_responses_request(request_body)
 
-    assert translated["tools"][0]["description"].startswith("Run shell commands")
-    assert '"type": "local"' in translated["tools"][0]["description"]
+def test_translate_responses_request_preserves_shell_call_environment():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": [
+                {
+                    "type": "shell_call",
+                    "call_id": "call_shell",
+                    "action": {"commands": ["pwd"], "timeout_ms": 1000},
+                    "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+                }
+            ],
+        }
+    )
+
     assert translated["messages"] == [
         {
             "role": "assistant",
@@ -640,7 +636,7 @@ def test_translate_responses_request_preserves_shell_environment():
                         "action": {"commands": ["pwd"], "timeout_ms": 1000},
                         "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
                     },
-                },
+                }
             ],
         }
     ]
@@ -680,6 +676,28 @@ def test_translate_responses_request_maps_failed_apply_patch_call_output_to_erro
     ]
 
 
+def test_translate_responses_request_rejects_apply_patch_call_output_id():
+    with pytest.raises(UnsupportedFeatureError, match="tool call output id"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "apply_patch_call",
+                        "call_id": "call_patch",
+                        "operation": {"type": "update_file", "path": "README.md", "diff": "*** Begin Patch\n*** End Patch\n"},
+                    },
+                    {
+                        "type": "apply_patch_call_output",
+                        "id": "apo_123",
+                        "call_id": "call_patch",
+                        "output": "patch applied",
+                    },
+                ],
+            }
+        )
+
+
 def test_translate_responses_request_maps_failed_shell_call_output_to_error_tool_result():
     request_body = {
         "model": "codex-MiniMax-M2.7",
@@ -708,6 +726,28 @@ def test_translate_responses_request_maps_failed_shell_call_output_to_error_tool
             "is_error": True,
         }
     ]
+
+
+def test_translate_responses_request_rejects_shell_call_output_id():
+    with pytest.raises(UnsupportedFeatureError, match="tool call output id"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "shell_call",
+                        "call_id": "call_shell",
+                        "action": {"commands": ["pwd"]},
+                    },
+                    {
+                        "type": "shell_call_output",
+                        "id": "sho_123",
+                        "call_id": "call_shell",
+                        "output": "ok",
+                    },
+                ],
+            }
+        )
 
 
 def test_translate_responses_request_filters_orphan_tool_results():
@@ -982,6 +1022,28 @@ def test_translate_anthropic_response_includes_reasoning_encrypted_content_when_
     ]
 
 
+def test_translate_anthropic_response_generates_reasoning_encrypted_content_when_missing_upstream_field():
+    body = {
+        "id": "msg_reasoning",
+        "content": [
+            {"type": "thinking", "thinking": "Plan carefully before acting"},
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    translated = translate_anthropic_response(
+        body,
+        "codex-MiniMax-M2.7",
+        response_context={"include": ["reasoning.encrypted_content"]},
+    )
+
+    reasoning_item = translated["output"][0]
+
+    assert reasoning_item["type"] == "reasoning"
+    assert isinstance(reasoning_item["encrypted_content"], str)
+    assert reasoning_item["encrypted_content"]
+
+
 def test_translate_anthropic_response_includes_request_context_fields():
     body = {
         "id": "msg_ctx",
@@ -1177,34 +1239,25 @@ def test_translate_responses_request_supports_multimodal_user_content():
 
 
 def test_translate_responses_request_rejects_unsupported_image_detail():
-    translated = translate_responses_request(
-        {
-            "model": "codex-MiniMax-M2.7",
-            "input": [
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_image",
-                            "image_url": "https://example.com/cat.png",
-                            "detail": "high",
-                        }
-                    ],
-                }
-            ],
-        }
-    )
-
-    assert translated["messages"] == [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "Use high detail for the next image."},
-                {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}},
-            ],
-        }
-    ]
+    with pytest.raises(UnsupportedFeatureError, match="input_image.detail"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_image",
+                                "image_url": "https://example.com/cat.png",
+                                "detail": "high",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
 
 
 def test_translate_responses_request_supports_inline_text_file_content():
@@ -1625,32 +1678,20 @@ def test_translate_responses_request_accepts_reasoning_summary_control():
     assert response_context["reasoning"] == {"effort": "high", "summary": "concise"}
 
 
-def test_translate_responses_request_accepts_lark_custom_tool_format_best_effort():
-    translated = translate_responses_request(
+def test_translate_anthropic_response_shapes_reasoning_summary_when_concise_requested():
+    translated = translate_anthropic_response(
         {
-            "model": "codex-MiniMax-M2.7",
-            "tools": [
-                {
-                    "type": "custom",
-                    "name": "dsl_tool",
-                    "description": "Run a DSL command",
-                    "format": {"type": "grammar", "syntax": "lark", "definition": "start: WORD"},
-                }
-            ],
-        }
+            "id": "msg_reasoning",
+            "content": [{"type": "thinking", "thinking": "First sentence. Second sentence with more detail."}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+        "codex-MiniMax-M2.7",
+        response_context={"reasoning": {"effort": "high", "summary": "concise"}},
     )
 
-    assert translated["tools"] == [
-        {
-            "name": "dsl_tool",
-            "description": "Run a DSL command\n\nInput grammar (lark):\nstart: WORD",
-            "input_schema": {
-                "type": "object",
-                "properties": {"input": {"type": "string"}},
-                "required": ["input"],
-                "additionalProperties": False,
-            },
-        }
+    assert translated["output"][0]["summary"] == [{"type": "summary_text", "text": "First sentence."}]
+    assert translated["output"][0]["content"] == [
+        {"type": "reasoning_text", "text": "First sentence. Second sentence with more detail."}
     ]
 
 
