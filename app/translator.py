@@ -136,12 +136,18 @@ def _builtin_tool_input_schema(tool_type):
         return {
             "type": "object",
             "properties": {
-                "commands": {"type": "array", "items": {"type": "string"}},
-                "timeout_ms": {"type": "integer"},
-                "max_output_length": {"type": "integer"},
-                "environment": {"type": "object"},
+                "action": {
+                    "type": "object",
+                    "properties": {
+                        "commands": {"type": "array", "items": {"type": "string"}},
+                        "timeout_ms": {"type": "integer"},
+                        "max_output_length": {"type": "integer"},
+                    },
+                    "required": ["commands"],
+                    "additionalProperties": False,
+                },
             },
-            "required": ["commands"],
+            "required": ["action"],
             "additionalProperties": False,
         }
     raise UnsupportedFeatureError(f"Unsupported Responses API tool type: {tool_type}")
@@ -155,11 +161,36 @@ def _custom_tool_description(description, format_spec):
     if format_type == "grammar":
         syntax = format_spec.get("syntax")
         definition = format_spec.get("definition")
-        if syntax not in {"lark", "regex"} or not isinstance(definition, str) or not definition.strip():
+        if syntax != "regex" or not isinstance(definition, str) or not definition.strip():
             raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
-        instruction = f"The tool input must be plain text matching this {syntax} grammar:\n{definition}"
-        return f"{description}\n\n{instruction}" if description else instruction
+        return description
     raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
+
+
+def _custom_tool_input_schema(format_spec):
+    format_type = format_spec.get("type", "text")
+    if format_type == "text":
+        input_property = {"type": "string"}
+    elif format_type == "grammar":
+        syntax = format_spec.get("syntax")
+        definition = format_spec.get("definition")
+        if syntax != "regex" or not isinstance(definition, str) or not definition.strip():
+            raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
+        input_property = {"type": "string", "pattern": definition}
+    else:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
+    return {
+        "type": "object",
+        "properties": {"input": input_property},
+        "required": ["input"],
+        "additionalProperties": False,
+    }
+
+
+def _assistant_phase_prefix(phase, role):
+    if role != "assistant" or phase is None:
+        return []
+    return [{"type": "text", "text": f"[assistant phase: {phase}]"}]
 
 
 def _translate_file_block(item):
@@ -301,12 +332,7 @@ def _translate_tools(tools):
                         or tool.get("function", {}).get("description", ""),
                         format_spec,
                     ),
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {"input": {"type": "string"}},
-                        "required": ["input"],
-                        "additionalProperties": False,
-                    },
+                    "input_schema": _custom_tool_input_schema(format_spec),
                 }
             )
             continue
@@ -413,6 +439,33 @@ def _tool_payload_object(payload):
     return {}
 
 
+def _normalize_shell_action(action, payload=None):
+    if action is None:
+        action = payload if isinstance(payload, dict) else {}
+    if not isinstance(action, dict):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: shell_call.action is not supported")
+
+    commands = action.get("commands")
+    if isinstance(commands, str):
+        commands = [commands]
+    if commands is not None and not isinstance(commands, list):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: shell_call.action.commands is not supported")
+
+    normalized = {}
+    if isinstance(commands, list):
+        normalized["commands"] = [str(command) for command in commands]
+    for field_name in ("timeout_ms", "max_output_length"):
+        value = action.get(field_name)
+        if value is not None:
+            normalized[field_name] = value
+
+    if not normalized and payload is not None:
+        fallback = _unwrap_custom_tool_payload(payload).strip()
+        if fallback:
+            normalized["commands"] = [fallback]
+    return normalized
+
+
 def _tool_item_payload(call_id, name, payload, status, response_context=None):
     item_type = _tool_type_lookup(response_context).get(name)
     if item_type is None:
@@ -436,18 +489,7 @@ def _tool_item_payload(call_id, name, payload, status, response_context=None):
         return item
     if item_type == "shell_call":
         payload_obj = _tool_payload_object(payload)
-        commands = payload_obj.get("commands")
-        if isinstance(commands, str):
-            commands = [commands]
-        if isinstance(commands, list):
-            item["commands"] = [str(command) for command in commands]
-        else:
-            fallback = _unwrap_custom_tool_payload(payload).strip()
-            item["commands"] = [fallback] if fallback else []
-        for field_name in ("max_output_length", "timeout_ms", "environment"):
-            value = payload_obj.get(field_name)
-            if value is not None:
-                item[field_name] = value
+        item["action"] = _normalize_shell_action(payload_obj.get("action"), payload_obj)
         return item
     item["name"] = name
     item["arguments"] = payload
@@ -482,7 +524,7 @@ def _reasoning_encrypted_content(block, response_context=None):
     return None
 
 
-def _reasoning_item_payload(item_id, text, encrypted_content=None):
+def _reasoning_item_payload(item_id, text, encrypted_content=None, status=None):
     item = {
         "id": item_id,
         "type": "reasoning",
@@ -492,6 +534,8 @@ def _reasoning_item_payload(item_id, text, encrypted_content=None):
         item["content"] = [{"type": "reasoning_text", "text": text}]
     if encrypted_content is not None:
         item["encrypted_content"] = encrypted_content
+    if status is not None:
+        item["status"] = status
     return item
 
 
@@ -938,6 +982,8 @@ def translate_responses_request(body):
             phase = item.get("phase")
             if phase not in {None, "commentary", "final_answer"}:
                 raise UnsupportedFeatureError("Unsupported Responses API feature: message phase is not supported")
+            if phase is not None and role != "assistant":
+                raise UnsupportedFeatureError("Unsupported Responses API feature: message phase is only supported for assistant messages")
             if role in {"developer", "system"}:
                 developer_blocks = _translate_content_blocks(item.get("content", []))
                 if any(block.get("type") != "text" for block in developer_blocks):
@@ -948,12 +994,9 @@ def translate_responses_request(body):
                 if developer_text:
                     system_segments.append(developer_text)
                 continue
-            result["messages"].append(
-                {
-                    "role": role,
-                    "content": _translate_content_blocks(item.get("content", [])),
-                }
-            )
+            translated_content = _translate_content_blocks(item.get("content", []))
+            translated_content = _assistant_phase_prefix(phase, role) + translated_content
+            result["messages"].append({"role": role, "content": translated_content})
             continue
 
         if item_type in {"function_call", "custom_tool_call", "apply_patch_call", "shell_call"}:
@@ -970,17 +1013,14 @@ def translate_responses_request(body):
             elif item_type == "apply_patch_call":
                 tool_input = {"operation": _parse_jsonish(item.get("operation"))}
             elif item_type == "shell_call":
-                tool_input = {}
+                legacy_action = {}
                 if item.get("commands") is not None:
-                    commands = item.get("commands")
-                    if isinstance(commands, str):
-                        commands = [commands]
-                    if not isinstance(commands, list):
-                        raise UnsupportedFeatureError("Unsupported Responses API feature: shell_call.commands is not supported")
-                    tool_input["commands"] = [str(command) for command in commands]
-                for field_name in ("timeout_ms", "max_output_length", "environment"):
+                    legacy_action["commands"] = item.get("commands")
+                for field_name in ("timeout_ms", "max_output_length"):
                     if item.get(field_name) is not None:
-                        tool_input[field_name] = item[field_name]
+                        legacy_action[field_name] = item[field_name]
+                shell_action = _normalize_shell_action(item.get("action"), legacy_action)
+                tool_input = {"action": shell_action} if shell_action else {}
             else:
                 tool_input = _parse_jsonish(item.get("arguments", item.get("input")))
             current_assistant_blocks.append(
@@ -1064,6 +1104,7 @@ def translate_anthropic_response(body, model, response_context=None):
     tool_call_seen = False
     response_status, incomplete_details = _response_completion_from_stop_reason(body.get("stop_reason"))
     message_status = "completed" if response_status == "completed" else "incomplete"
+    reasoning_status = message_status
 
     for index, block in enumerate(body.get("content", [])):
         block_type = block.get("type")
@@ -1074,6 +1115,7 @@ def translate_anthropic_response(body, model, response_context=None):
                     f"rs_{response_id}_{index}",
                     summary_text,
                     encrypted_content=_reasoning_encrypted_content(block, response_context=response_context),
+                    status=reasoning_status,
                 )
             )
         elif block_type == "text":
@@ -1177,6 +1219,9 @@ class ResponsesEventTranslator:
     def _final_message_status(self):
         return "completed" if self._final_response_status() == "completed" else "incomplete"
 
+    def _final_reasoning_status(self):
+        return self._final_message_status()
+
     def _emit(self, event, data):
         self.sequence += 1
         payload = dict(data)
@@ -1198,6 +1243,11 @@ class ResponsesEventTranslator:
                     f"rs_{self.response_id}_{assistant_index}",
                     self.reasoning_buffers.get(assistant_index, ""),
                     encrypted_content=self.reasoning_encrypted.get(assistant_index),
+                    status=(
+                        self._final_reasoning_status()
+                        if assistant_index in self.reasoning_done
+                        else "in_progress"
+                    ),
                 )
             )
         if assistant_index in self.message_added:
@@ -1400,7 +1450,7 @@ class ResponsesEventTranslator:
             return []
         self.reasoning_added.add(index)
         item_id = f"rs_{self.response_id}_{index}"
-        item = {"id": item_id, "type": "reasoning", "summary": []}
+        item = {"id": item_id, "type": "reasoning", "summary": [], "status": "in_progress"}
         encrypted_content = self.reasoning_encrypted.get(index)
         if encrypted_content is not None:
             item["encrypted_content"] = encrypted_content
@@ -1459,7 +1509,12 @@ class ResponsesEventTranslator:
                 {
                     "type": "response.output_item.done",
                     "output_index": index,
-                    "item": _reasoning_item_payload(item_id, text, encrypted_content=encrypted_content),
+                    "item": _reasoning_item_payload(
+                        item_id,
+                        text,
+                        encrypted_content=encrypted_content,
+                        status=self._final_reasoning_status(),
+                    ),
                 },
             ),
         ]

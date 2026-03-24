@@ -112,15 +112,36 @@ def test_translate_responses_request_supports_custom_tools_with_grammar_format()
     assert translated["tools"] == [
         {
             "name": "matcher",
-            "description": "Match custom input\n\nThe tool input must be plain text matching this regex grammar:\n^[a-z]+$",
+            "description": "Match custom input",
             "input_schema": {
                 "type": "object",
-                "properties": {"input": {"type": "string"}},
+                "properties": {"input": {"type": "string", "pattern": "^[a-z]+$"}},
                 "required": ["input"],
                 "additionalProperties": False,
             },
         }
     ]
+
+
+def test_translate_responses_request_rejects_lark_custom_tool_format():
+    with pytest.raises(UnsupportedFeatureError, match="custom tool format"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                "tools": [
+                    {
+                        "type": "custom",
+                        "name": "matcher",
+                        "format": {
+                            "type": "grammar",
+                            "syntax": "lark",
+                            "definition": "start: WORD",
+                        },
+                    }
+                ],
+            }
+        )
 
 
 def test_translate_responses_request_skips_nameless_hosted_tools():
@@ -221,7 +242,36 @@ def test_translate_responses_request_accepts_final_answer_message_phase():
     assert translated["messages"] == [
         {
             "role": "assistant",
-            "content": [{"type": "text", "text": "Done"}],
+            "content": [
+                {"type": "text", "text": "[assistant phase: final_answer]"},
+                {"type": "text", "text": "Done"},
+            ],
+        }
+    ]
+
+
+def test_translate_responses_request_preserves_commentary_message_phase():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "Thinking"}],
+                }
+            ],
+        }
+    )
+
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "[assistant phase: commentary]"},
+                {"type": "text", "text": "Thinking"},
+            ],
         }
     ]
 
@@ -350,9 +400,11 @@ def test_translate_responses_request_accepts_shell_call_items():
             {
                 "type": "shell_call",
                 "call_id": "call_shell",
-                "commands": ["pwd"],
-                "timeout_ms": 1000,
-                "max_output_length": 4096,
+                "action": {
+                    "commands": ["pwd"],
+                    "timeout_ms": 1000,
+                    "max_output_length": 4096,
+                },
             },
         ],
     }
@@ -368,9 +420,11 @@ def test_translate_responses_request_accepts_shell_call_items():
                     "id": "call_shell",
                     "name": "shell",
                     "input": {
-                        "commands": ["pwd"],
-                        "timeout_ms": 1000,
-                        "max_output_length": 4096,
+                        "action": {
+                            "commands": ["pwd"],
+                            "timeout_ms": 1000,
+                            "max_output_length": 4096,
+                        }
                     },
                 },
             ],
@@ -533,7 +587,7 @@ def test_translate_responses_request_accepts_shell_call_output_items():
             {
                 "type": "shell_call",
                 "call_id": "call_shell",
-                "commands": ["pwd"],
+                "action": {"commands": ["pwd"]},
             },
             {
                 "type": "shell_call_output",
@@ -554,7 +608,7 @@ def test_translate_responses_request_accepts_shell_call_output_items():
                     "id": "call_shell",
                     "name": "shell",
                     "input": {
-                        "commands": ["pwd"],
+                        "action": {"commands": ["pwd"]},
                     },
                 },
             ],
@@ -716,11 +770,7 @@ def test_translate_anthropic_response_maps_shell_tool_use_to_builtin_call():
                 "type": "tool_use",
                 "id": "call_shell",
                 "name": "shell",
-                "input": {
-                    "commands": ["pwd"],
-                    "timeout_ms": 1000,
-                    "max_output_length": 4096,
-                },
+                "input": {"action": {"commands": ["pwd"], "timeout_ms": 1000, "max_output_length": 4096}},
             },
         ],
         "usage": {"input_tokens": 10, "output_tokens": 5},
@@ -737,9 +787,7 @@ def test_translate_anthropic_response_maps_shell_tool_use_to_builtin_call():
             "id": "fc_call_shell",
             "type": "shell_call",
             "call_id": "call_shell",
-            "commands": ["pwd"],
-            "timeout_ms": 1000,
-            "max_output_length": 4096,
+            "action": {"commands": ["pwd"], "timeout_ms": 1000, "max_output_length": 4096},
             "status": "completed",
         }
     ]
@@ -757,6 +805,19 @@ def test_translate_anthropic_response_marks_message_phase_and_incomplete_details
 
     assert translated["incomplete_details"] is None
     assert translated["output"][0]["phase"] == "final_answer"
+
+
+def test_translate_anthropic_response_marks_reasoning_items_completed():
+    translated = translate_anthropic_response(
+        {
+            "id": "msg_reasoning",
+            "content": [{"type": "thinking", "thinking": "Plan"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+        "codex-MiniMax-M2.7",
+    )
+
+    assert translated["output"][0]["status"] == "completed"
 
 
 def test_translate_anthropic_response_marks_max_tokens_stop_as_incomplete():
@@ -797,6 +858,7 @@ def test_translate_anthropic_response_includes_reasoning_encrypted_content_when_
             "summary": [{"type": "summary_text", "text": "Plan"}],
             "content": [{"type": "reasoning_text", "text": "Plan"}],
             "encrypted_content": "enc_sig_123",
+            "status": "completed",
         }
     ]
 
@@ -1257,6 +1319,7 @@ def test_translate_anthropic_response_maps_thinking_to_reasoning_output():
         "type": "reasoning",
         "summary": [{"type": "summary_text", "text": "Need to inspect weather first"}],
         "content": [{"type": "reasoning_text", "text": "Need to inspect weather first"}],
+        "status": "completed",
     }
     assert translated["output"][1]["type"] == "message"
 

@@ -74,7 +74,7 @@ Currently supported on `/v1/responses`:
 - Embedded `tool_use` / `tool_result` content blocks inside messages
 - `custom_tool_call` / `custom_tool_call_output` input items mapped onto Anthropic tool turns
 - custom tools exposed upstream through a string-input wrapper object so text inputs remain usable
-- custom tool `grammar` format preserved as best-effort tool guidance
+- custom tool `grammar` format with `regex` syntax mapped into a string pattern constraint
 - Responses output typing for `function_call`, `custom_tool_call`, `apply_patch_call`, and `shell_call`
 - Text/image/PDF user content blocks:
   - `input_text`
@@ -101,6 +101,7 @@ Currently supported on `/v1/responses`:
   - function call argument deltas
 - SSE parsing with standard multiline `data:` support and `event:` header tolerance
 - Non-stream Anthropic `thinking` blocks mapped into Responses `reasoning` output items
+- reasoning output items carry `status` on both streaming and non-streaming paths
 - Anthropic `stop_reason` mapped into Responses `status` / `incomplete_details` for truncated turns
 
 Explicitly unsupported today:
@@ -127,12 +128,15 @@ Explicitly unsupported today:
 Compatibility notes:
 
 - `custom` tools from Codex are accepted and exposed upstream as plain callable tools with an object schema.
-- assistant text outputs are labeled with `phase: "final_answer"`; input message `phase` accepts `commentary` and `final_answer` and is otherwise rejected.
+- assistant text outputs are labeled with `phase: "final_answer"`.
+- input assistant message `phase` is preserved best-effort by prepending a synthetic phase text block before the translated assistant content; non-assistant messages with `phase` are rejected.
 - function tools with `strict=false` are rejected instead of being silently weakened.
 - function tools omitted `strict` on input are echoed back with the OpenAI default `strict: true`.
 - developer/system messages are text-only; non-text content is rejected instead of being dropped.
 - `include: ["reasoning.encrypted_content"]` is best-effort only: the proxy emits `encrypted_content` when MiniMax reasoning blocks expose a compatible `data` or `signature` field, and otherwise returns a normal reasoning item without that field.
 - `reasoning.summary` is accepted, but MiniMax does not expose a native summary control; the proxy preserves the field without promising exact summary granularity.
 - built-in `apply_patch` and `shell` calls are modeled with their OpenAI item types on the Responses side, while still being proxied upstream as Anthropic-style tool calls.
+- `shell_call` is normalized to the OpenAI `action` object shape on the Responses side; legacy flat shell payloads are still accepted on input for compatibility.
 - `input_image.detail` is best-effort only because Anthropic-compatible image inputs do not expose an equivalent detail knob.
+- custom tool grammars with `syntax: "lark"` are explicitly unsupported; only `regex` grammars are mapped structurally today.
 - nameless hosted tools from Codex are ignored instead of failing the request, so Codex CLI can continue to operate when it sends local-only tool descriptors the proxy cannot translate upstream.

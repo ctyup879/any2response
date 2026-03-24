@@ -381,6 +381,50 @@ def test_translate_anthropic_tool_use_stream_to_apply_patch_call_events():
     assert output_item["operation"]["path"] == "README.md"
 
 
+def test_translate_anthropic_tool_use_stream_to_shell_call_events():
+    translator = ResponsesEventTranslator(
+        response_context={"tools": [{"type": "shell", "name": "shell"}]},
+    )
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "call_shell",
+                "name": "shell",
+                "input": {"action": {"commands": ["pwd"], "timeout_ms": 1000}},
+            },
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    added = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.added" and event["data"]["item"]["call_id"] == "call_shell"
+    )
+    done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["call_id"] == "call_shell"
+    )
+    completed = next(event for event in events if event["event"] == "response.completed")
+    output_item = next(item for item in completed["data"]["response"]["output"] if item["call_id"] == "call_shell")
+
+    assert added["data"]["item"]["type"] == "shell_call"
+    assert done["data"]["item"]["type"] == "shell_call"
+    assert output_item["type"] == "shell_call"
+    assert output_item["action"] == {"commands": ["pwd"], "timeout_ms": 1000}
+
+
 def test_translate_anthropic_tool_use_with_start_input_closes_with_full_arguments():
     translator = ResponsesEventTranslator()
     events = []
@@ -539,8 +583,15 @@ def test_translate_anthropic_reasoning_done_item_includes_reasoning_text_content
         for event in events
         if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "reasoning"
     )
+    added = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.added" and event["data"]["item"]["type"] == "reasoning"
+    )
     completed = next(event for event in events if event["event"] == "response.completed")
 
+    assert added["data"]["item"]["status"] == "in_progress"
+    assert done["data"]["item"]["status"] == "completed"
     assert done["data"]["item"]["content"] == [{"type": "reasoning_text", "text": "Planning"}]
     assert completed["data"]["response"]["output"][0]["content"] == [
         {"type": "reasoning_text", "text": "Planning"}
