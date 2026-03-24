@@ -222,6 +222,20 @@ def _translate_tools(tools):
     return translated
 
 
+def _normalize_include(include):
+    if include is None:
+        return []
+    if not isinstance(include, list):
+        raise UnsupportedFeatureError("Unsupported Responses API include value")
+    allowed = {"reasoning.encrypted_content"}
+    normalized = []
+    for value in include:
+        if value not in allowed:
+            raise UnsupportedFeatureError(f"Unsupported Responses API include value: {value}")
+        normalized.append(value)
+    return normalized
+
+
 def build_response_context(body, model=None):
     text_config = body.get("text")
     if not isinstance(text_config, dict):
@@ -253,6 +267,8 @@ def build_response_context(body, model=None):
         "truncation": body.get("truncation", "disabled"),
         "max_tool_calls": body.get("max_tool_calls"),
         "background": body.get("background", False),
+        "include": _normalize_include(body.get("include")),
+        "prompt_cache_key": body.get("prompt_cache_key"),
     }
 
 
@@ -386,6 +402,7 @@ def translate_responses_request(body):
         raise UnsupportedFeatureError("background mode is not supported")
     if body.get("previous_response_id"):
         raise UnsupportedFeatureError("Unsupported Responses API feature: previous_response_id is not supported")
+    _normalize_include(body.get("include"))
 
     result = {
         "model": body.get("model"),
@@ -545,6 +562,8 @@ def translate_anthropic_response(body, model, response_context=None):
     completed_at = int(time.time())
     output = []
     output_text_parts = []
+    parallel_tool_calls = True if response_context is None else response_context.get("parallel_tool_calls", True)
+    tool_call_seen = False
 
     for index, block in enumerate(body.get("content", [])):
         block_type = block.get("type")
@@ -577,6 +596,9 @@ def translate_anthropic_response(body, model, response_context=None):
                 }
             )
         elif block_type == "tool_use":
+            if not parallel_tool_calls and tool_call_seen:
+                continue
+            tool_call_seen = True
             output.append(
                 {
                     "id": f"fc_{block.get('id', uuid.uuid4().hex[:8])}",
@@ -633,6 +655,7 @@ class ResponsesEventTranslator:
         self.tool_args = {}
         self.tool_seed_args = {}
         self.tool_done = set()
+        self.ignored_tool_indexes = set()
         self.usage = {}
 
     def _assistant_output_index(self):
@@ -724,6 +747,8 @@ class ResponsesEventTranslator:
             "truncation": self.response_context.get("truncation", "disabled"),
             "max_output_tokens": self.response_context.get("max_output_tokens"),
             "instructions": self.response_context.get("instructions"),
+            "include": self.response_context.get("include", []),
+            "prompt_cache_key": self.response_context.get("prompt_cache_key"),
         }
         max_tool_calls = self.response_context.get("max_tool_calls")
         if max_tool_calls is not None:
@@ -1002,6 +1027,9 @@ class ResponsesEventTranslator:
             elif block.get("type") == "thinking":
                 events.extend(self._ensure_reasoning_started(index))
             elif block.get("type") == "tool_use":
+                if not self.response_context.get("parallel_tool_calls", True) and self.tool_calls:
+                    self.ignored_tool_indexes.add(index)
+                    return events
                 call_id = block.get("id", f"call_{uuid.uuid4().hex[:8]}")
                 name = block.get("name", "")
                 self.tool_calls[index] = {"call_id": call_id, "name": name}
@@ -1068,6 +1096,8 @@ class ResponsesEventTranslator:
                 )
                 return events
             if delta_type == "input_json_delta":
+                if index in self.ignored_tool_indexes or index not in self.tool_calls:
+                    return events
                 partial = delta.get("partial_json", "")
                 self.tool_args[index] = self.tool_args.get(index, "") + partial
                 call_id = self.tool_calls[index]["call_id"]
@@ -1086,6 +1116,8 @@ class ResponsesEventTranslator:
 
         if event_type == "content_block_stop":
             index = event.get("index", 0)
+            if index in self.ignored_tool_indexes:
+                return events
             if index in self.tool_calls:
                 events.extend(self._close_tool(index))
             return events

@@ -372,6 +372,8 @@ def test_translate_anthropic_response_includes_request_context_fields():
         "temperature": 0.2,
         "top_p": 0.9,
         "parallel_tool_calls": True,
+        "include": ["reasoning.encrypted_content"],
+        "prompt_cache_key": "cache-key-123",
     }
 
     translated = translate_anthropic_response(
@@ -391,8 +393,63 @@ def test_translate_anthropic_response_includes_request_context_fields():
     assert translated["temperature"] == 0.2
     assert translated["top_p"] == 0.9
     assert translated["parallel_tool_calls"] is True
+    assert translated["include"] == ["reasoning.encrypted_content"]
+    assert translated["prompt_cache_key"] == "cache-key-123"
     assert translated["output_text"] == "Hello"
     assert translated["completed_at"] >= translated["created_at"]
+
+
+def test_translate_responses_request_accepts_reasoning_encrypted_content_include():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "cache-key-123",
+            "parallel_tool_calls": False,
+        }
+    )
+
+    assert translated["messages"] == [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+
+
+def test_translate_responses_request_rejects_unknown_include_values():
+    with pytest.raises(UnsupportedFeatureError, match="include"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "include": ["output_text.logprobs"],
+            }
+        )
+
+
+def test_translate_anthropic_response_limits_tool_calls_when_parallel_disabled():
+    body = {
+        "id": "msg_multi_tool",
+        "content": [
+            {"type": "tool_use", "id": "call_1", "name": "tool_a", "input": {"x": 1}},
+            {"type": "tool_use", "id": "call_2", "name": "tool_b", "input": {"y": 2}},
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    translated = translate_anthropic_response(
+        body,
+        "codex-MiniMax-M2.7",
+        response_context={"parallel_tool_calls": False},
+    )
+
+    assert translated["output"] == [
+        {
+            "id": "fc_call_1",
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "tool_a",
+            "arguments": '{"x": 1}',
+            "status": "completed",
+        }
+    ]
 
 
 def test_translate_responses_request_accepts_string_input():

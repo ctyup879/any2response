@@ -49,6 +49,9 @@ Currently supported on `/v1/responses`:
   - `top_p`
   - `stop`
   - `text.format` and legacy `response_format` for JSON-mode instruction injection
+  - `prompt_cache_key` retained in proxy response context
+  - `include: ["reasoning.encrypted_content"]` accepted as a no-op compatibility flag
+  - `parallel_tool_calls: false` enforced proxy-side by exposing only the first tool call from an upstream turn
 - Streaming translation for:
   - text deltas
   - reasoning/thinking deltas
