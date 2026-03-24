@@ -38,10 +38,11 @@ Currently supported on `/v1/responses`:
 - `tool_choice.allowed_tools` via proxy-side tool filtering
 - Function call / function call output turn translation
 - Embedded `tool_use` / `tool_result` content blocks inside messages
+- `custom_tool_call` / `custom_tool_call_output` input items mapped onto Anthropic tool turns
 - Text/image/PDF user content blocks:
   - `input_text`
   - `input_image` with `data:` URL or `http(s)` URL
-  - `input_file` with inline `data:` for images/PDFs
+  - `input_file` with inline `data:` for text, JSON, images, and PDFs
 - Sampling and output controls:
   - `max_output_tokens`
   - `temperature`
@@ -59,8 +60,9 @@ Explicitly unsupported today:
 
 - `background`
 - `previous_response_id`
+- `item_reference`
 - `input_file.file_id`
-- non-image/non-PDF file media types
+- remote text-file fetching and most non-text/non-image/non-PDF file media types
 - named OpenAI hosted tool types beyond plain function tools, such as `file_search`, `web_search`, and `code_interpreter`
 - full OpenAI reasoning item replay semantics
 - annotations/logprobs/citations style response extras

@@ -178,6 +178,31 @@ def test_translate_responses_request_groups_consecutive_function_calls():
     ]
 
 
+def test_translate_responses_request_accepts_custom_tool_call_items():
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_patch",
+                "name": "apply_patch",
+                "input": '{"path":"README.md"}',
+            },
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call_patch", "name": "apply_patch", "input": {"path": "README.md"}},
+            ],
+        }
+    ]
+
+
 def test_translate_responses_request_groups_consecutive_tool_results():
     request_body = {
         "model": "codex-MiniMax-M2.7",
@@ -224,6 +249,46 @@ def test_translate_responses_request_groups_consecutive_tool_results():
                 {"type": "tool_result", "tool_use_id": "call_2", "content": '{"ok": 2}'},
             ],
         }
+    ]
+
+
+def test_translate_responses_request_accepts_custom_tool_call_output_items():
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": [
+            {
+                "type": "custom_tool_call",
+                "call_id": "call_patch",
+                "name": "apply_patch",
+                "input": '{"path":"README.md"}',
+            },
+            {
+                "type": "custom_tool_call_output",
+                "call_id": "call_patch",
+                "output": [{"type": "input_text", "text": "patch applied"}],
+            },
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call_patch", "name": "apply_patch", "input": {"path": "README.md"}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_patch",
+                    "content": [{"type": "text", "text": "patch applied"}],
+                },
+            ],
+        },
     ]
 
 
@@ -375,6 +440,68 @@ def test_translate_responses_request_supports_multimodal_user_content():
     ]
 
 
+def test_translate_responses_request_supports_inline_text_file_content():
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "summarize this"},
+                    {
+                        "type": "input_file",
+                        "filename": "notes.txt",
+                        "file_data": "data:text/plain;base64,SGVsbG8gZnJvbSBmaWxl",
+                    },
+                ],
+            }
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "summarize this"},
+                {"type": "text", "text": "Hello from file"},
+            ],
+        }
+    ]
+
+
+def test_translate_responses_request_supports_inline_json_file_content():
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_file",
+                        "filename": "payload.json",
+                        "file_data": "data:application/json;base64,eyJoZWxsbyI6ICJ3b3JsZCJ9",
+                    },
+                ],
+            }
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": '{"hello": "world"}'},
+            ],
+        }
+    ]
+
+
 def test_translate_responses_request_supports_text_format_and_sampling_controls():
     request_body = {
         "model": "codex-MiniMax-M2.7",
@@ -411,6 +538,16 @@ def test_translate_responses_request_rejects_previous_response_id():
                 "model": "codex-MiniMax-M2.7",
                 "previous_response_id": "resp_123",
                 "input": "hello",
+            }
+        )
+
+
+def test_translate_responses_request_rejects_item_reference_inputs():
+    with pytest.raises(UnsupportedFeatureError, match="item_reference"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [{"type": "item_reference", "id": "msg_123"}],
             }
         )
 

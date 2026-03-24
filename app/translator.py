@@ -1,6 +1,8 @@
+import base64
 import json
 import mimetypes
 import time
+import urllib.parse
 import uuid
 
 
@@ -42,6 +44,31 @@ def _parse_data_url(value):
 def _guess_media_type(filename_or_url):
     media_type, _ = mimetypes.guess_type(filename_or_url or "")
     return media_type or "application/octet-stream"
+
+
+def _is_textual_media_type(media_type):
+    if not isinstance(media_type, str):
+        return False
+    if media_type.startswith("text/"):
+        return True
+    return media_type in {
+        "application/json",
+        "application/ld+json",
+        "application/x-httpd-php",
+        "application/x-javascript",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+        "application/toml",
+    }
+
+
+def _decode_data_url_text(parsed):
+    data = parsed.get("data", "")
+    if parsed.get("is_base64"):
+        raw = base64.b64decode(data)
+        return raw.decode("utf-8")
+    return urllib.parse.unquote_to_bytes(data).decode("utf-8")
 
 
 def _translate_image_block(item):
@@ -86,6 +113,8 @@ def _translate_file_block(item):
         return {"type": "image", "source": source}
     if media_type == "application/pdf":
         return {"type": "document", "source": source}
+    if parsed and _is_textual_media_type(media_type):
+        return {"type": "text", "text": _decode_data_url_text(parsed)}
     raise UnsupportedFeatureError(f"Unsupported input_file media type: {media_type}")
 
 
@@ -152,6 +181,19 @@ def _translate_content_blocks(content):
         raise UnsupportedFeatureError(f"Unsupported content block type: {item_type}")
 
     return blocks
+
+
+def _translate_tool_result_content(value):
+    if isinstance(value, list):
+        try:
+            return _translate_content_blocks(value)
+        except UnsupportedFeatureError:
+            return _stringify(value)
+    if isinstance(value, dict):
+        if value.get("type"):
+            return _translate_content_blocks([value])
+        return _stringify(value)
+    return _stringify(value)
 
 
 def _translate_tools(tools):
@@ -426,7 +468,7 @@ def translate_responses_request(body):
             )
             continue
 
-        if item_type == "function_call":
+        if item_type in {"function_call", "custom_tool_call"}:
             name = (item.get("name") or "").strip()
             if not name:
                 continue
@@ -436,12 +478,12 @@ def translate_responses_request(body):
                     "type": "tool_use",
                     "id": item.get("call_id", f"call_{uuid.uuid4().hex[:8]}"),
                     "name": name,
-                    "input": _parse_jsonish(item.get("arguments")),
+                    "input": _parse_jsonish(item.get("arguments", item.get("input"))),
                 }
             )
             continue
 
-        if item_type == "function_call_output":
+        if item_type in {"function_call_output", "custom_tool_call_output"}:
             flush_assistant()
             call_id = item.get("call_id", "")
             if not call_id:
@@ -450,13 +492,16 @@ def translate_responses_request(body):
                 {
                     "type": "tool_result",
                     "tool_use_id": call_id,
-                    "content": _stringify(item.get("output", "")),
+                    "content": _translate_tool_result_content(item.get("output", "")),
                 }
             )
             continue
 
         if item_type == "reasoning":
             continue
+
+        if item_type == "item_reference":
+            raise UnsupportedFeatureError("Unsupported Responses API feature: item_reference is not supported")
 
         raise UnsupportedFeatureError(f"Unsupported input item type: {item_type}")
 
