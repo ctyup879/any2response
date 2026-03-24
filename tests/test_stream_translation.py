@@ -331,6 +331,56 @@ def test_translate_anthropic_tool_use_stream_to_custom_tool_call_events():
     assert output_item["input"] == "*** Begin Patch\n*** End Patch\n"
 
 
+def test_translate_anthropic_tool_use_stream_to_apply_patch_call_events():
+    translator = ResponsesEventTranslator(
+        response_context={"tools": [{"type": "apply_patch", "name": "apply_patch"}]},
+    )
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "call_patch",
+                "name": "apply_patch",
+                "input": {
+                    "operation": {
+                        "type": "update_file",
+                        "path": "README.md",
+                        "diff": "*** Begin Patch\n*** End Patch\n",
+                    }
+                },
+            },
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    added = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.added" and event["data"]["item"]["call_id"] == "call_patch"
+    )
+    done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["call_id"] == "call_patch"
+    )
+    completed = next(event for event in events if event["event"] == "response.completed")
+    output_item = next(item for item in completed["data"]["response"]["output"] if item["call_id"] == "call_patch")
+
+    assert added["data"]["item"]["type"] == "apply_patch_call"
+    assert done["data"]["item"]["type"] == "apply_patch_call"
+    assert output_item["type"] == "apply_patch_call"
+    assert output_item["operation"]["path"] == "README.md"
+
+
 def test_translate_anthropic_tool_use_with_start_input_closes_with_full_arguments():
     translator = ResponsesEventTranslator()
     events = []
@@ -419,6 +469,46 @@ def test_translate_anthropic_stream_completed_includes_usage_details():
 
     assert completed["data"]["response"]["usage"]["input_tokens_details"] == {"cached_tokens": 0}
     assert completed["data"]["response"]["usage"]["output_tokens_details"] == {"reasoning_tokens": 0}
+
+
+def test_translate_anthropic_stream_marks_max_tokens_stop_as_incomplete():
+    translator = ResponsesEventTranslator()
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Partial"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "max_tokens"},
+            "usage": {"input_tokens": 3, "output_tokens": 2},
+        },
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    message_done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "message"
+    )
+    completed = next(event for event in events if event["event"] == "response.completed")
+
+    assert message_done["data"]["item"]["status"] == "incomplete"
+    assert completed["data"]["response"]["status"] == "incomplete"
+    assert completed["data"]["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
 
 
 def test_translate_anthropic_reasoning_done_item_includes_reasoning_text_content():

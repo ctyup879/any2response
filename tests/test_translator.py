@@ -89,6 +89,40 @@ def test_translate_responses_request_supports_custom_tools():
     ]
 
 
+def test_translate_responses_request_supports_custom_tools_with_grammar_format():
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+        "tools": [
+            {
+                "type": "custom",
+                "name": "matcher",
+                "description": "Match custom input",
+                "format": {
+                    "type": "grammar",
+                    "syntax": "regex",
+                    "definition": "^[a-z]+$",
+                },
+            }
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["tools"] == [
+        {
+            "name": "matcher",
+            "description": "Match custom input\n\nThe tool input must be plain text matching this regex grammar:\n^[a-z]+$",
+            "input_schema": {
+                "type": "object",
+                "properties": {"input": {"type": "string"}},
+                "required": ["input"],
+                "additionalProperties": False,
+            },
+        }
+    ]
+
+
 def test_translate_responses_request_skips_nameless_hosted_tools():
     request_body = {
         "model": "codex-MiniMax-M2.7",
@@ -152,7 +186,7 @@ def test_translate_responses_request_maps_developer_messages_to_system():
     assert translated["messages"] == [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
 
 
-def test_translate_responses_request_rejects_message_phase():
+def test_translate_responses_request_rejects_invalid_message_phase():
     with pytest.raises(UnsupportedFeatureError, match="phase"):
         translate_responses_request(
             {
@@ -161,12 +195,35 @@ def test_translate_responses_request_rejects_message_phase():
                     {
                         "type": "message",
                         "role": "assistant",
-                        "phase": "commentary",
+                        "phase": "side_channel",
                         "content": [{"type": "output_text", "text": "Thinking"}],
                     }
                 ],
             }
         )
+
+
+def test_translate_responses_request_accepts_final_answer_message_phase():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": "Done"}],
+                }
+            ],
+        }
+    )
+
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Done"}],
+        }
+    ]
 
 
 def test_translate_responses_request_rejects_unknown_message_role():
@@ -241,6 +298,80 @@ def test_translate_responses_request_accepts_custom_tool_call_items():
                     "id": "call_patch",
                     "name": "apply_patch",
                     "input": {"input": "*** Begin Patch\n*** End Patch\n"},
+                },
+            ],
+        }
+    ]
+
+
+def test_translate_responses_request_accepts_apply_patch_call_items():
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": [
+            {
+                "type": "apply_patch_call",
+                "call_id": "call_patch",
+                "operation": {
+                    "type": "update_file",
+                    "path": "README.md",
+                    "diff": "*** Begin Patch\n*** End Patch\n",
+                },
+            },
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_patch",
+                    "name": "apply_patch",
+                    "input": {
+                        "operation": {
+                            "type": "update_file",
+                            "path": "README.md",
+                            "diff": "*** Begin Patch\n*** End Patch\n",
+                        }
+                    },
+                },
+            ],
+        }
+    ]
+
+
+def test_translate_responses_request_accepts_shell_call_items():
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": [
+            {
+                "type": "shell_call",
+                "call_id": "call_shell",
+                "commands": ["pwd"],
+                "timeout_ms": 1000,
+                "max_output_length": 4096,
+            },
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_shell",
+                    "name": "shell",
+                    "input": {
+                        "commands": ["pwd"],
+                        "timeout_ms": 1000,
+                        "max_output_length": 4096,
+                    },
                 },
             ],
         }
@@ -341,6 +472,106 @@ def test_translate_responses_request_accepts_custom_tool_call_output_items():
     ]
 
 
+def test_translate_responses_request_accepts_apply_patch_call_output_items():
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": [
+            {
+                "type": "apply_patch_call",
+                "call_id": "call_patch",
+                "operation": {
+                    "type": "update_file",
+                    "path": "README.md",
+                    "diff": "*** Begin Patch\n*** End Patch\n",
+                },
+            },
+            {
+                "type": "apply_patch_call_output",
+                "call_id": "call_patch",
+                "output": "patch applied",
+            },
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_patch",
+                    "name": "apply_patch",
+                    "input": {
+                        "operation": {
+                            "type": "update_file",
+                            "path": "README.md",
+                            "diff": "*** Begin Patch\n*** End Patch\n",
+                        }
+                    },
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_patch",
+                    "content": "patch applied",
+                }
+            ],
+        },
+    ]
+
+
+def test_translate_responses_request_accepts_shell_call_output_items():
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": [
+            {
+                "type": "shell_call",
+                "call_id": "call_shell",
+                "commands": ["pwd"],
+            },
+            {
+                "type": "shell_call_output",
+                "call_id": "call_shell",
+                "output": "stdout: /root/minimaxdemo",
+            },
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_shell",
+                    "name": "shell",
+                    "input": {
+                        "commands": ["pwd"],
+                    },
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call_shell",
+                    "content": "stdout: /root/minimaxdemo",
+                }
+            ],
+        },
+    ]
+
+
 def test_translate_responses_request_filters_orphan_tool_results():
     request_body = {
         "model": "codex-MiniMax-M2.7",
@@ -436,6 +667,84 @@ def test_translate_anthropic_response_maps_custom_tool_use_to_custom_tool_call()
     ]
 
 
+def test_translate_anthropic_response_maps_apply_patch_tool_use_to_builtin_call():
+    body = {
+        "id": "msg_tool",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "call_patch",
+                "name": "apply_patch",
+                "input": {
+                    "operation": {
+                        "type": "update_file",
+                        "path": "README.md",
+                        "diff": "*** Begin Patch\n*** End Patch\n",
+                    }
+                },
+            },
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    translated = translate_anthropic_response(
+        body,
+        "codex-MiniMax-M2.7",
+        response_context={"tools": [{"type": "apply_patch", "name": "apply_patch"}]},
+    )
+
+    assert translated["output"] == [
+        {
+            "id": "fc_call_patch",
+            "type": "apply_patch_call",
+            "call_id": "call_patch",
+            "status": "completed",
+            "operation": {
+                "type": "update_file",
+                "path": "README.md",
+                "diff": "*** Begin Patch\n*** End Patch\n",
+            },
+        }
+    ]
+
+
+def test_translate_anthropic_response_maps_shell_tool_use_to_builtin_call():
+    body = {
+        "id": "msg_tool",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "call_shell",
+                "name": "shell",
+                "input": {
+                    "commands": ["pwd"],
+                    "timeout_ms": 1000,
+                    "max_output_length": 4096,
+                },
+            },
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    translated = translate_anthropic_response(
+        body,
+        "codex-MiniMax-M2.7",
+        response_context={"tools": [{"type": "shell", "name": "shell"}]},
+    )
+
+    assert translated["output"] == [
+        {
+            "id": "fc_call_shell",
+            "type": "shell_call",
+            "call_id": "call_shell",
+            "commands": ["pwd"],
+            "timeout_ms": 1000,
+            "max_output_length": 4096,
+            "status": "completed",
+        }
+    ]
+
+
 def test_translate_anthropic_response_marks_message_phase_and_incomplete_details():
     translated = translate_anthropic_response(
         {
@@ -448,6 +757,22 @@ def test_translate_anthropic_response_marks_message_phase_and_incomplete_details
 
     assert translated["incomplete_details"] is None
     assert translated["output"][0]["phase"] == "final_answer"
+
+
+def test_translate_anthropic_response_marks_max_tokens_stop_as_incomplete():
+    translated = translate_anthropic_response(
+        {
+            "id": "msg_text",
+            "stop_reason": "max_tokens",
+            "content": [{"type": "text", "text": "Partial"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+        "codex-MiniMax-M2.7",
+    )
+
+    assert translated["status"] == "incomplete"
+    assert translated["incomplete_details"] == {"reason": "max_output_tokens"}
+    assert translated["output"][0]["status"] == "incomplete"
 
 
 def test_translate_anthropic_response_includes_reasoning_encrypted_content_when_requested():
@@ -671,25 +996,34 @@ def test_translate_responses_request_supports_multimodal_user_content():
 
 
 def test_translate_responses_request_rejects_unsupported_image_detail():
-    with pytest.raises(UnsupportedFeatureError, match="detail"):
-        translate_responses_request(
-            {
-                "model": "codex-MiniMax-M2.7",
-                "input": [
-                    {
-                        "type": "message",
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_image",
-                                "image_url": "https://example.com/cat.png",
-                                "detail": "high",
-                            }
-                        ],
-                    }
-                ],
-            }
-        )
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_image",
+                            "image_url": "https://example.com/cat.png",
+                            "detail": "high",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert translated["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Use high detail for the next image."},
+                {"type": "image", "source": {"type": "url", "url": "https://example.com/cat.png"}},
+            ],
+        }
+    ]
 
 
 def test_translate_responses_request_supports_inline_text_file_content():
@@ -1030,8 +1364,8 @@ def test_translate_responses_request_synthesizes_builtin_tool_choice_definition(
             "description": "",
             "input_schema": {
                 "type": "object",
-                "properties": {"input": {"type": "string"}},
-                "required": ["input"],
+                "properties": {"operation": {"type": "object"}},
+                "required": ["operation"],
                 "additionalProperties": False,
             },
         }
@@ -1087,15 +1421,26 @@ def test_translate_responses_request_omits_thinking_for_reasoning_none():
     assert "thinking" not in translated
 
 
-def test_translate_responses_request_rejects_reasoning_summary_control():
-    with pytest.raises(UnsupportedFeatureError, match="reasoning.summary"):
-        translate_responses_request(
-            {
-                "model": "codex-MiniMax-M2.7",
-                "input": "hello",
-                "reasoning": {"summary": "concise"},
-            }
-        )
+def test_translate_responses_request_accepts_reasoning_summary_control():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "max_output_tokens": 4000,
+            "reasoning": {"effort": "high", "summary": "concise"},
+        }
+    )
+
+    response_context = build_response_context(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "reasoning": {"effort": "high", "summary": "concise"},
+        }
+    )
+
+    assert translated["thinking"] == {"type": "enabled", "budget_tokens": 3200}
+    assert response_context["reasoning"] == {"effort": "high", "summary": "concise"}
 
 
 def test_translate_responses_request_rejects_invalid_reasoning_effort():

@@ -21,6 +21,15 @@ UNSUPPORTED_REQUEST_FIELDS = {
 }
 
 
+RESPONSE_COMPLETED_STOP_REASONS = {None, "end_turn", "stop_sequence", "tool_use", "refusal"}
+RESPONSE_INCOMPLETE_STOP_REASONS = {
+    "max_tokens": {"reason": "max_output_tokens"},
+    "model_context_window_exceeded": {"reason": "max_input_tokens"},
+    "pause_turn": {"reason": "other"},
+}
+SUPPORTED_REASONING_SUMMARIES = {None, "auto", "concise", "detailed"}
+
+
 def _stringify(value):
     if isinstance(value, str):
         return value
@@ -83,9 +92,6 @@ def _decode_data_url_text(parsed):
 
 
 def _translate_image_block(item):
-    detail = item.get("detail")
-    if detail not in (None, "auto"):
-        raise UnsupportedFeatureError("Unsupported Responses API feature: input_image.detail is not supported")
     image_url = item.get("image_url", "")
     if isinstance(image_url, dict):
         image_url = image_url.get("url", "")
@@ -104,6 +110,56 @@ def _translate_image_block(item):
     if isinstance(image_url, str) and image_url.startswith(("http://", "https://")):
         return {"type": "image", "source": {"type": "url", "url": image_url}}
     raise UnsupportedFeatureError("Unsupported input_image source")
+
+
+def _image_detail_instruction(detail):
+    if detail in (None, "auto"):
+        return None
+    if detail == "low":
+        return "Use low detail for the next image."
+    if detail == "high":
+        return "Use high detail for the next image."
+    raise UnsupportedFeatureError("Unsupported Responses API feature: input_image.detail is not supported")
+
+
+def _builtin_tool_input_schema(tool_type):
+    if tool_type == "apply_patch":
+        return {
+            "type": "object",
+            "properties": {
+                "operation": {"type": "object"},
+            },
+            "required": ["operation"],
+            "additionalProperties": False,
+        }
+    if tool_type == "shell":
+        return {
+            "type": "object",
+            "properties": {
+                "commands": {"type": "array", "items": {"type": "string"}},
+                "timeout_ms": {"type": "integer"},
+                "max_output_length": {"type": "integer"},
+                "environment": {"type": "object"},
+            },
+            "required": ["commands"],
+            "additionalProperties": False,
+        }
+    raise UnsupportedFeatureError(f"Unsupported Responses API tool type: {tool_type}")
+
+
+def _custom_tool_description(description, format_spec):
+    description = description or ""
+    format_type = format_spec.get("type", "text")
+    if format_type == "text":
+        return description
+    if format_type == "grammar":
+        syntax = format_spec.get("syntax")
+        definition = format_spec.get("definition")
+        if syntax not in {"lark", "regex"} or not isinstance(definition, str) or not definition.strip():
+            raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
+        instruction = f"The tool input must be plain text matching this {syntax} grammar:\n{definition}"
+        return f"{description}\n\n{instruction}" if description else instruction
+    raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
 
 
 def _translate_file_block(item):
@@ -150,6 +206,9 @@ def _translate_content_blocks(content):
             blocks.append({"type": "text", "text": item.get("text", "")})
             continue
         if item_type in {"input_image", "image_url"}:
+            instruction = _image_detail_instruction(item.get("detail"))
+            if instruction:
+                blocks.append({"type": "text", "text": instruction})
             blocks.append(_translate_image_block(item))
             continue
         if item_type in {"input_file", "file"}:
@@ -217,7 +276,9 @@ def _translate_tools(tools):
             continue
         tool_type = tool.get("type")
         tool_name = tool.get("name") or tool.get("function", {}).get("name", "")
-        if tool_type not in {None, "function", "custom"}:
+        if tool_type in {"apply_patch", "shell"} and not tool_name:
+            tool_name = tool_type
+        if tool_type not in {None, "function", "custom", "apply_patch", "shell"}:
             if not str(tool_name).strip():
                 continue
             raise UnsupportedFeatureError(
@@ -232,20 +293,30 @@ def _translate_tools(tools):
             format_spec = tool.get("format") or {"type": "text"}
             if not isinstance(format_spec, dict):
                 raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
-            format_type = format_spec.get("type", "text")
-            if format_type != "text":
-                raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
             translated.append(
                 {
                     "name": tool_name,
-                    "description": tool.get("description")
-                    or tool.get("function", {}).get("description", ""),
+                    "description": _custom_tool_description(
+                        tool.get("description")
+                        or tool.get("function", {}).get("description", ""),
+                        format_spec,
+                    ),
                     "input_schema": {
                         "type": "object",
                         "properties": {"input": {"type": "string"}},
                         "required": ["input"],
                         "additionalProperties": False,
                     },
+                }
+            )
+            continue
+        if tool_type in {"apply_patch", "shell"}:
+            translated.append(
+                {
+                    "name": tool_name,
+                    "description": tool.get("description")
+                    or tool.get("function", {}).get("description", ""),
+                    "input_schema": _builtin_tool_input_schema(tool_type),
                 }
             )
             continue
@@ -300,6 +371,14 @@ def _validate_supported_request_fields(body):
             )
 
 
+def _builtin_tool_type_for_name(name):
+    if name == "apply_patch":
+        return "apply_patch_call"
+    if name == "shell":
+        return "shell_call"
+    return None
+
+
 def _tool_type_lookup(response_context):
     lookup = {}
     if not isinstance(response_context, dict):
@@ -313,24 +392,65 @@ def _tool_type_lookup(response_context):
         tool_type = tool.get("type")
         if tool_type == "custom":
             lookup[name.strip()] = "custom_tool_call"
+        elif tool_type == "apply_patch":
+            lookup[name.strip()] = "apply_patch_call"
+        elif tool_type == "shell":
+            lookup[name.strip()] = "shell_call"
         else:
             lookup.setdefault(name.strip(), "function_call")
     return lookup
 
 
+def _tool_payload_object(payload):
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def _tool_item_payload(call_id, name, payload, status, response_context=None):
-    item_type = _tool_type_lookup(response_context).get(name, "function_call")
+    item_type = _tool_type_lookup(response_context).get(name)
+    if item_type is None:
+        item_type = _builtin_tool_type_for_name(name) or "function_call"
     item = {
         "id": f"fc_{call_id}",
         "type": item_type,
         "call_id": call_id,
-        "name": name,
         "status": status,
     }
     if item_type == "custom_tool_call":
+        item["name"] = name
         item["input"] = _unwrap_custom_tool_payload(payload)
-    else:
-        item["arguments"] = payload
+        return item
+    if item_type == "apply_patch_call":
+        payload_obj = _tool_payload_object(payload)
+        operation = payload_obj.get("operation")
+        if not isinstance(operation, dict):
+            operation = payload_obj if isinstance(payload_obj, dict) and payload_obj else {}
+        item["operation"] = operation
+        return item
+    if item_type == "shell_call":
+        payload_obj = _tool_payload_object(payload)
+        commands = payload_obj.get("commands")
+        if isinstance(commands, str):
+            commands = [commands]
+        if isinstance(commands, list):
+            item["commands"] = [str(command) for command in commands]
+        else:
+            fallback = _unwrap_custom_tool_payload(payload).strip()
+            item["commands"] = [fallback] if fallback else []
+        for field_name in ("max_output_length", "timeout_ms", "environment"):
+            value = payload_obj.get(field_name)
+            if value is not None:
+                item[field_name] = value
+        return item
+    item["name"] = name
+    item["arguments"] = payload
     return item
 
 
@@ -383,6 +503,10 @@ def _normalize_response_tools(tools):
             continue
         normalized_tool = dict(tool)
         tool_type = normalized_tool.get("type")
+        if tool_type in {"apply_patch", "shell"} and not normalized_tool.get("name"):
+            normalized_tool["name"] = tool_type
+        if tool_type == "custom" and "format" not in normalized_tool:
+            normalized_tool["format"] = {"type": "text"}
         if tool_type in {None, "function"} and "strict" not in normalized_tool:
             normalized_tool["strict"] = True
         normalized.append(normalized_tool)
@@ -419,6 +543,31 @@ def _unwrap_custom_tool_payload(payload):
     return _stringify(payload)
 
 
+def _effective_response_tools(body):
+    tools = _normalize_response_tools(body.get("tools", []))
+    tool_choice = body.get("tool_choice")
+    if not isinstance(tool_choice, dict):
+        return tools
+
+    choice_type = tool_choice.get("type")
+    if choice_type == "custom":
+        name = tool_choice.get("name")
+        if name and all(tool.get("name") != name for tool in tools if isinstance(tool, dict)):
+            tools.append({"type": "custom", "name": name, "format": {"type": "text"}})
+        return tools
+    if choice_type in {"apply_patch", "shell"}:
+        name = choice_type
+        if all(tool.get("name") != name for tool in tools if isinstance(tool, dict)):
+            tools.append({"type": choice_type, "name": name})
+    return tools
+
+
+def _response_completion_from_stop_reason(stop_reason):
+    if stop_reason in RESPONSE_COMPLETED_STOP_REASONS:
+        return "completed", None
+    return "incomplete", RESPONSE_INCOMPLETE_STOP_REASONS.get(stop_reason, {"reason": "other"})
+
+
 def _tool_stream_event_spec(call, response_context=None):
     item_type = _tool_type_lookup(response_context).get(call.get("name", ""), "function_call")
     if item_type == "custom_tool_call":
@@ -446,6 +595,13 @@ def build_response_context(body, model=None):
     reasoning = body.get("reasoning")
     if not isinstance(reasoning, dict):
         reasoning = {"effort": None, "summary": None}
+    summary = reasoning.get("summary")
+    if summary not in SUPPORTED_REASONING_SUMMARIES:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning.summary is not supported")
+    reasoning = {
+        "effort": reasoning.get("effort"),
+        "summary": summary,
+    }
 
     return {
         "model": model or body.get("model"),
@@ -455,7 +611,7 @@ def build_response_context(body, model=None):
         "user": body.get("user"),
         "store": body.get("store", False),
         "tool_choice": body.get("tool_choice", "auto"),
-        "tools": _normalize_response_tools(body.get("tools", [])),
+        "tools": _effective_response_tools(body),
         "text": text_config,
         "temperature": body.get("temperature", 1.0),
         "top_p": body.get("top_p", 1.0),
@@ -533,7 +689,7 @@ def _thinking_from_reasoning(body, max_tokens):
     if not isinstance(reasoning, dict):
         return None
 
-    if reasoning.get("summary") is not None:
+    if reasoning.get("summary") not in SUPPORTED_REASONING_SUMMARIES:
         raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning.summary is not supported")
 
     effort = (reasoning.get("effort") or "").lower()
@@ -575,11 +731,19 @@ def _ensure_tool_definitions(result):
             name = block.get("name")
             if not name or name in known_tools:
                 continue
-            placeholder = {
-                "name": name,
-                "description": "",
-                "input_schema": {"type": "object", "properties": {}},
-            }
+            builtin_tool_type = name if name in {"apply_patch", "shell"} else None
+            if builtin_tool_type:
+                placeholder = {
+                    "name": name,
+                    "description": "",
+                    "input_schema": _builtin_tool_input_schema(builtin_tool_type),
+                }
+            else:
+                placeholder = {
+                    "name": name,
+                    "description": "",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
             result.setdefault("tools", []).append(placeholder)
             known_tools[name] = placeholder
 
@@ -720,18 +884,28 @@ def translate_responses_request(body):
         and tool_choice.get("type") == "tool"
         and all(tool.get("name") != tool_choice["name"] for tool in tools)
     ):
-        tools.append(
-            {
-                "name": tool_choice["name"],
-                "description": "",
-                "input_schema": {
-                    "type": "object",
-                    "properties": {"input": {"type": "string"}},
-                    "required": ["input"],
-                    "additionalProperties": False,
-                },
-            }
-        )
+        choice_type = tool_choice_input.get("type")
+        if choice_type == "custom":
+            tools.append(
+                {
+                    "name": tool_choice["name"],
+                    "description": "",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"input": {"type": "string"}},
+                        "required": ["input"],
+                        "additionalProperties": False,
+                    },
+                }
+            )
+        else:
+            tools.append(
+                {
+                    "name": tool_choice["name"],
+                    "description": "",
+                    "input_schema": _builtin_tool_input_schema(choice_type),
+                }
+            )
     if tools:
         result["tools"] = tools
     if tool_choice:
@@ -761,7 +935,8 @@ def translate_responses_request(body):
             role = item.get("role", "user")
             if role not in {"user", "assistant", "developer", "system"}:
                 raise UnsupportedFeatureError("Unsupported Responses API feature: message role is not supported")
-            if item.get("phase") is not None:
+            phase = item.get("phase")
+            if phase not in {None, "commentary", "final_answer"}:
                 raise UnsupportedFeatureError("Unsupported Responses API feature: message phase is not supported")
             if role in {"developer", "system"}:
                 developer_blocks = _translate_content_blocks(item.get("content", []))
@@ -781,26 +956,49 @@ def translate_responses_request(body):
             )
             continue
 
-        if item_type in {"function_call", "custom_tool_call"}:
+        if item_type in {"function_call", "custom_tool_call", "apply_patch_call", "shell_call"}:
             name = (item.get("name") or "").strip()
+            if item_type == "apply_patch_call":
+                name = "apply_patch"
+            elif item_type == "shell_call":
+                name = "shell"
             if not name:
                 continue
             flush_tool_results()
+            if item_type == "custom_tool_call":
+                tool_input = _custom_tool_payload(item.get("input"))
+            elif item_type == "apply_patch_call":
+                tool_input = {"operation": _parse_jsonish(item.get("operation"))}
+            elif item_type == "shell_call":
+                tool_input = {}
+                if item.get("commands") is not None:
+                    commands = item.get("commands")
+                    if isinstance(commands, str):
+                        commands = [commands]
+                    if not isinstance(commands, list):
+                        raise UnsupportedFeatureError("Unsupported Responses API feature: shell_call.commands is not supported")
+                    tool_input["commands"] = [str(command) for command in commands]
+                for field_name in ("timeout_ms", "max_output_length", "environment"):
+                    if item.get(field_name) is not None:
+                        tool_input[field_name] = item[field_name]
+            else:
+                tool_input = _parse_jsonish(item.get("arguments", item.get("input")))
             current_assistant_blocks.append(
                 {
                     "type": "tool_use",
                     "id": item.get("call_id", f"call_{uuid.uuid4().hex[:8]}"),
                     "name": name,
-                    "input": (
-                        _custom_tool_payload(item.get("input"))
-                        if item_type == "custom_tool_call"
-                        else _parse_jsonish(item.get("arguments", item.get("input")))
-                    ),
+                    "input": tool_input,
                 }
             )
             continue
 
-        if item_type in {"function_call_output", "custom_tool_call_output"}:
+        if item_type in {
+            "function_call_output",
+            "custom_tool_call_output",
+            "apply_patch_call_output",
+            "shell_call_output",
+        }:
             flush_assistant()
             call_id = item.get("call_id", "")
             if not call_id:
@@ -864,6 +1062,8 @@ def translate_anthropic_response(body, model, response_context=None):
     output_text_parts = []
     parallel_tool_calls = True if response_context is None else response_context.get("parallel_tool_calls", True)
     tool_call_seen = False
+    response_status, incomplete_details = _response_completion_from_stop_reason(body.get("stop_reason"))
+    message_status = "completed" if response_status == "completed" else "incomplete"
 
     for index, block in enumerate(body.get("content", [])):
         block_type = block.get("type")
@@ -885,7 +1085,7 @@ def translate_anthropic_response(body, model, response_context=None):
                     "type": "message",
                     "role": "assistant",
                     "phase": "final_answer",
-                    "status": "completed",
+                    "status": message_status,
                     "content": [
                         {
                             "type": "output_text",
@@ -917,10 +1117,10 @@ def translate_anthropic_response(body, model, response_context=None):
         "object": "response",
         "created_at": created_at,
         "completed_at": completed_at,
-        "status": "completed",
+        "status": response_status,
         "model": model,
         "error": None,
-        "incomplete_details": None,
+        "incomplete_details": incomplete_details,
         "output": output,
         "output_text": "".join(output_text_parts),
         "usage": _usage_payload(body.get("usage", {})),
@@ -953,6 +1153,7 @@ class ResponsesEventTranslator:
         self.tool_done = set()
         self.ignored_tool_indexes = set()
         self.usage = {}
+        self.stop_reason = None
 
     def _include_obfuscation(self):
         stream_options = self.response_context.get("stream_options") or {}
@@ -966,6 +1167,15 @@ class ResponsesEventTranslator:
 
     def _assistant_output_index(self):
         return 0
+
+    def _final_response_status(self):
+        return _response_completion_from_stop_reason(self.stop_reason)[0]
+
+    def _final_incomplete_details(self):
+        return _response_completion_from_stop_reason(self.stop_reason)[1]
+
+    def _final_message_status(self):
+        return "completed" if self._final_response_status() == "completed" else "incomplete"
 
     def _emit(self, event, data):
         self.sequence += 1
@@ -998,7 +1208,7 @@ class ResponsesEventTranslator:
                     "type": "message",
                     "role": "assistant",
                     "phase": "final_answer",
-                    "status": "completed" if assistant_index in self.message_done else "in_progress",
+                    "status": self._final_message_status() if assistant_index in self.message_done else "in_progress",
                     "content": [
                         {
                             "type": "output_text",
@@ -1032,7 +1242,7 @@ class ResponsesEventTranslator:
             "status": status,
             "background": self.response_context.get("background", False),
             "error": None,
-            "incomplete_details": None,
+            "incomplete_details": self._final_incomplete_details() if status == "incomplete" else None,
             "model": self.model,
             "output": self._build_output_items() if include_output else [],
             "metadata": self.response_context.get("metadata", {}),
@@ -1170,7 +1380,7 @@ class ResponsesEventTranslator:
                             "type": "message",
                             "role": "assistant",
                             "phase": "final_answer",
-                            "status": "completed",
+                            "status": self._final_message_status(),
                             "content": [
                             {
                                 "type": "output_text",
@@ -1299,7 +1509,7 @@ class ResponsesEventTranslator:
                 {
                     "type": "response.completed",
                     "response": self._response_payload(
-                        "completed",
+                        self._final_response_status(),
                         include_output=True,
                         include_usage=True,
                         include_completed_at=True,
@@ -1438,6 +1648,9 @@ class ResponsesEventTranslator:
 
         if event_type == "message_delta":
             self.usage = event.get("usage", {}) or {}
+            delta = event.get("delta", {}) or {}
+            if delta.get("stop_reason") is not None:
+                self.stop_reason = delta.get("stop_reason")
             return events
 
         if event_type == "message_stop":
