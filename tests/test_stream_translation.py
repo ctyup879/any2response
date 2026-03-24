@@ -119,6 +119,42 @@ def test_translate_anthropic_thinking_block_to_reasoning_events():
     assert "response.output_item.done" in event_types
 
 
+def test_translate_anthropic_thinking_block_emits_reasoning_encrypted_content_when_requested():
+    translator = ResponsesEventTranslator(
+        response_context={"include": ["reasoning.encrypted_content"]},
+    )
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": "", "signature": "enc_sig_456"},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Planning"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "reasoning"
+    )
+    completed = next(event for event in events if event["event"] == "response.completed")
+
+    assert done["data"]["item"]["encrypted_content"] == "enc_sig_456"
+    assert completed["data"]["response"]["output"][0]["encrypted_content"] == "enc_sig_456"
+
+
 def test_translate_anthropic_reasoning_and_text_share_same_output_index():
     translator = ResponsesEventTranslator()
     events = []
@@ -245,6 +281,7 @@ def test_translate_anthropic_tool_use_stream_to_custom_tool_call_events():
         for event in events
         if event["event"] == "response.output_item.added" and event["data"]["item"]["call_id"] == "call_patch"
     )
+    input_done = next(event for event in events if event["event"] == "response.custom_tool_call_input.done")
     done = next(
         event
         for event in events
@@ -254,6 +291,7 @@ def test_translate_anthropic_tool_use_stream_to_custom_tool_call_events():
     output_item = next(item for item in completed["data"]["response"]["output"] if item["call_id"] == "call_patch")
 
     assert added["data"]["item"]["type"] == "custom_tool_call"
+    assert input_done["data"]["input"] == '{"path": "README.md"}'
     assert done["data"]["item"]["type"] == "custom_tool_call"
     assert output_item["type"] == "custom_tool_call"
     assert output_item["input"] == '{"path": "README.md"}'
@@ -287,6 +325,66 @@ def test_translate_anthropic_tool_use_with_start_input_closes_with_full_argument
 
     assert arg_deltas == []
     assert args_done["data"]["arguments"] == '{"city": "Shanghai"}'
+
+
+def test_translate_anthropic_custom_tool_stream_uses_custom_input_delta_events():
+    translator = ResponsesEventTranslator(
+        response_context={"tools": [{"type": "custom", "name": "apply_patch"}]},
+    )
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "tool_use", "id": "call_patch", "name": "apply_patch", "input": {}},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": '{"path":"REA'},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": 'DME.md"}'},
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    delta_events = [event for event in events if event["event"] == "response.custom_tool_call_input.delta"]
+    done_event = next(event for event in events if event["event"] == "response.custom_tool_call_input.done")
+
+    assert [event["data"]["delta"] for event in delta_events] == ['{"path":"REA', 'DME.md"}']
+    assert done_event["data"]["input"] == '{"path":"README.md"}'
+
+
+def test_translate_anthropic_stream_completed_includes_usage_details():
+    translator = ResponsesEventTranslator()
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"input_tokens": 3, "output_tokens": 2},
+        },
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    completed = next(event for event in events if event["event"] == "response.completed")
+
+    assert completed["data"]["response"]["usage"]["input_tokens_details"] == {"cached_tokens": 0}
+    assert completed["data"]["response"]["usage"]["output_tokens_details"] == {"reasoning_tokens": 0}
 
 
 def test_translate_anthropic_stream_rejects_multiple_tool_calls_when_parallel_disabled():

@@ -2,6 +2,7 @@ import pytest
 
 from app.translator import (
     UnsupportedFeatureError,
+    build_response_context,
     translate_anthropic_response,
     translate_responses_request,
 )
@@ -351,7 +352,13 @@ def test_translate_anthropic_response_maps_tool_use_to_function_call():
         "arguments": '{"city": "Shanghai"}',
         "status": "completed",
     }
-    assert translated["usage"] == {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+    assert translated["usage"] == {
+        "input_tokens": 10,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": 5,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": 15,
+    }
 
 
 def test_translate_anthropic_response_maps_custom_tool_use_to_custom_tool_call():
@@ -377,6 +384,31 @@ def test_translate_anthropic_response_maps_custom_tool_use_to_custom_tool_call()
             "name": "apply_patch",
             "input": '{"path": "README.md"}',
             "status": "completed",
+        }
+    ]
+
+
+def test_translate_anthropic_response_includes_reasoning_encrypted_content_when_requested():
+    body = {
+        "id": "msg_reasoning",
+        "content": [
+            {"type": "thinking", "thinking": "Plan", "signature": "enc_sig_123"},
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    translated = translate_anthropic_response(
+        body,
+        "codex-MiniMax-M2.7",
+        response_context={"include": ["reasoning.encrypted_content"]},
+    )
+
+    assert translated["output"] == [
+        {
+            "id": "rs_resp_msg_reasoning_0",
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "Plan"}],
+            "encrypted_content": "enc_sig_123",
         }
     ]
 
@@ -422,6 +454,8 @@ def test_translate_anthropic_response_includes_request_context_fields():
     assert translated["parallel_tool_calls"] is True
     assert translated["include"] == ["reasoning.encrypted_content"]
     assert translated["prompt_cache_key"] == "cache-key-123"
+    assert translated["usage"]["input_tokens_details"] == {"cached_tokens": 0}
+    assert translated["usage"]["output_tokens_details"] == {"reasoning_tokens": 0}
     assert translated["output_text"] == "Hello"
     assert translated["completed_at"] >= translated["created_at"]
 
@@ -438,6 +472,29 @@ def test_translate_responses_request_accepts_reasoning_encrypted_content_include
     )
 
     assert translated["messages"] == [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+
+
+def test_translate_responses_request_rejects_nonzero_top_logprobs():
+    with pytest.raises(UnsupportedFeatureError, match="top_logprobs"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "top_logprobs": 3,
+            }
+        )
+
+
+def test_build_response_context_preserves_zero_top_logprobs():
+    context = build_response_context(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "top_logprobs": 0,
+        }
+    )
+
+    assert context["top_logprobs"] == 0
 
 
 @pytest.mark.parametrize(

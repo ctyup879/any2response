@@ -112,6 +112,8 @@ def test_post_responses_non_stream():
     data = response.json()
     assert data["object"] == "response"
     assert data["status"] == "completed"
+    assert data["usage"]["input_tokens_details"] == {"cached_tokens": 0}
+    assert data["usage"]["output_tokens_details"] == {"reasoning_tokens": 0}
     assert data["output"][0]["content"][0]["text"] == "Hello from MiniMax"
 
 
@@ -147,6 +149,8 @@ def test_post_responses_stream():
     assert "event: response.output_text.delta" in body
     assert "Hello from stream" in body
     assert "event: response.completed" in body
+    assert '"input_tokens_details":{"cached_tokens":0}' in body
+    assert '"output_tokens_details":{"reasoning_tokens":0}' in body
     assert "data: [DONE]" in body
 
 
