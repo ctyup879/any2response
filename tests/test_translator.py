@@ -716,6 +716,39 @@ def test_translate_responses_request_rejects_background_mode():
         )
 
 
+def test_translate_responses_request_rejects_store_true():
+    with pytest.raises(UnsupportedFeatureError, match="store"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "store": True,
+                "input": "hello",
+            }
+        )
+
+
+def test_translate_responses_request_rejects_non_default_truncation():
+    with pytest.raises(UnsupportedFeatureError, match="truncation"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "truncation": "auto",
+                "input": "hello",
+            }
+        )
+
+
+def test_translate_responses_request_rejects_max_tool_calls():
+    with pytest.raises(UnsupportedFeatureError, match="max_tool_calls"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "max_tool_calls": 1,
+                "input": "hello",
+            }
+        )
+
+
 def test_translate_responses_request_supports_embedded_tool_blocks():
     request_body = {
         "model": "codex-MiniMax-M2.7",

@@ -510,6 +510,13 @@ def translate_responses_request(body):
         raise UnsupportedFeatureError("background mode is not supported")
     if body.get("previous_response_id"):
         raise UnsupportedFeatureError("Unsupported Responses API feature: previous_response_id is not supported")
+    if body.get("store"):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: store is not supported")
+    truncation = body.get("truncation")
+    if truncation not in (None, "disabled"):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: truncation is not supported")
+    if body.get("max_tool_calls") is not None:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: max_tool_calls is not supported")
     _normalize_include(body.get("include"))
     top_logprobs = body.get("top_logprobs")
     if top_logprobs not in (None, 0):

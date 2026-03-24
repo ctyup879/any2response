@@ -81,7 +81,7 @@ Currently supported on `/v1/responses`:
   - `stop`
   - `text.format` and legacy `response_format` for JSON-mode instruction injection
   - `prompt_cache_key` retained in proxy response context
-  - `include: ["reasoning.encrypted_content"]` accepted as a no-op compatibility flag
+  - best-effort `include: ["reasoning.encrypted_content"]` when the upstream reasoning block exposes a compatible field
   - `parallel_tool_calls: false` enforced proxy-side by rejecting upstream turns that contain multiple tool calls
 - Streaming translation for:
   - text deltas
@@ -93,7 +93,10 @@ Currently supported on `/v1/responses`:
 Explicitly unsupported today:
 
 - `background`
+- `store=true`
 - `previous_response_id`
+- `truncation` values other than `disabled`
+- `max_tool_calls`
 - `item_reference`
 - `conversation`
 - `context_management`
@@ -110,5 +113,5 @@ Explicitly unsupported today:
 Compatibility notes:
 
 - `custom` tools from Codex are accepted and exposed upstream as plain callable tools with an object schema.
-- `include: ["reasoning.encrypted_content"]` is still accepted because `codex` sends it today, but MiniMax does not expose an upstream equivalent that this proxy can map into OpenAI-style `encrypted_content`.
+- `include: ["reasoning.encrypted_content"]` is best-effort only: the proxy emits `encrypted_content` when MiniMax reasoning blocks expose a compatible `data` or `signature` field, and otherwise returns a normal reasoning item without that field.
 - nameless hosted tools from Codex are ignored instead of failing the request, so Codex CLI can continue to operate when it sends local-only tool descriptors the proxy cannot translate upstream.
