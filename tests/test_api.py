@@ -1,0 +1,173 @@
+from fastapi.testclient import TestClient
+
+from app.main import create_app
+
+
+class FakeUpstreamClient:
+    def __init__(self):
+        self.last_payload = None
+
+    async def create_message(self, payload):
+        self.last_payload = payload
+        return {
+            "id": "msg_fake",
+            "role": "assistant",
+            "type": "message",
+            "content": [{"type": "text", "text": "Hello from MiniMax"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 4, "output_tokens": 4},
+        }
+
+    async def stream_messages(self, payload):
+        self.last_payload = payload
+        for item in [
+            {"type": "message_start", "message": {"id": "msg_stream"}},
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "text", "text": ""},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "text_delta", "text": "Hello from stream"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"input_tokens": 5, "output_tokens": 3},
+            },
+            {"type": "message_stop"},
+        ]:
+            yield item
+
+
+def test_post_responses_requires_auth():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post("/v1/responses", json={"model": "codex-MiniMax-M2.7", "input": []})
+
+    assert response.status_code == 401
+    assert response.json()["error"]["message"] == "Unauthorized"
+
+
+def test_post_responses_non_stream():
+    upstream = FakeUpstreamClient()
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=upstream,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": False,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert upstream.last_payload["messages"][0]["content"][0]["text"] == "hello"
+    data = response.json()
+    assert data["object"] == "response"
+    assert data["status"] == "completed"
+    assert data["output"][0]["content"][0]["text"] == "Hello from MiniMax"
+
+
+def test_post_responses_stream():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": True,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    body = response.text
+    assert "event: response.output_text.delta" in body
+    assert "Hello from stream" in body
+    assert "event: response.completed" in body
+    assert "data: [DONE]" in body
+
+
+def test_post_responses_forwards_replayed_tool_turns_to_upstream():
+    upstream = FakeUpstreamClient()
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=upstream,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": False,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "check project"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "exec_command",
+                    "arguments": {"cmd": "pwd"},
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_1",
+                    "output": "/root/minimaxdemo",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert upstream.last_payload is not None
+    assert upstream.last_payload["messages"][-2]["content"][0]["type"] == "tool_use"
+    assert upstream.last_payload["messages"][-1]["content"][0]["type"] == "tool_result"

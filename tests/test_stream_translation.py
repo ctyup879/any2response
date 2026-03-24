@@ -1,0 +1,239 @@
+from app.translator import ResponsesEventTranslator
+
+
+def test_translate_anthropic_sse_to_responses_events():
+    translator = ResponsesEventTranslator()
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hello"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"input_tokens": 3, "output_tokens": 2},
+        },
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    event_types = [event["event"] for event in events]
+
+    assert event_types[:2] == ["response.created", "response.in_progress"]
+    assert "response.output_item.added" in event_types
+    assert "response.content_part.added" in event_types
+    assert "response.output_text.delta" in event_types
+    assert "response.output_text.done" in event_types
+    assert "response.output_item.done" in event_types
+    assert event_types[-1] == "response.completed"
+
+    delta_event = next(event for event in events if event["event"] == "response.output_text.delta")
+    assert delta_event["data"]["delta"] == "Hello"
+
+    completed_event = events[-1]
+    assert completed_event["data"]["response"]["status"] == "completed"
+
+
+def test_translate_anthropic_sse_includes_request_context_fields():
+    translator = ResponsesEventTranslator(
+        model="codex-MiniMax-M2.7",
+        response_context={
+            "instructions": "Be concise",
+            "metadata": {"request_id": "abc"},
+            "user": "user-123",
+            "store": False,
+            "tool_choice": "auto",
+            "tools": [{"type": "function", "name": "echo"}],
+            "text": {"format": {"type": "text"}},
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "parallel_tool_calls": True,
+            "max_output_tokens": 128,
+        },
+    )
+
+    events = translator.feed({"type": "message_start", "message": {"id": "msg_ctx"}})
+    created = next(event for event in events if event["event"] == "response.created")
+    in_progress = next(event for event in events if event["event"] == "response.in_progress")
+
+    assert created["data"]["response"]["instructions"] == "Be concise"
+    assert created["data"]["response"]["metadata"] == {"request_id": "abc"}
+    assert created["data"]["response"]["user"] == "user-123"
+    assert created["data"]["response"]["store"] is False
+    assert created["data"]["response"]["tool_choice"] == "auto"
+    assert created["data"]["response"]["tools"] == [{"type": "function", "name": "echo"}]
+    assert created["data"]["response"]["text"] == {"format": {"type": "text"}}
+    assert created["data"]["response"]["temperature"] == 0.2
+    assert created["data"]["response"]["top_p"] == 0.9
+    assert created["data"]["response"]["parallel_tool_calls"] is True
+    assert created["data"]["response"]["max_output_tokens"] == 128
+    assert in_progress["data"]["response"]["metadata"] == {"request_id": "abc"}
+
+
+def test_translate_anthropic_thinking_block_to_reasoning_events():
+    translator = ResponsesEventTranslator()
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Planning"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    event_types = [event["event"] for event in events]
+
+    assert "response.reasoning_summary_part.added" in event_types
+    assert "response.reasoning_summary_text.delta" in event_types
+    assert "response.reasoning_summary_text.done" in event_types
+    assert "response.output_item.done" in event_types
+
+
+def test_translate_anthropic_reasoning_and_text_share_same_output_index():
+    translator = ResponsesEventTranslator()
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Planning"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "Hello"},
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    reasoning_added = next(event for event in events if event["event"] == "response.output_item.added")
+    message_added = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.added" and event["data"]["item"]["type"] == "message"
+    )
+    text_delta = next(event for event in events if event["event"] == "response.output_text.delta")
+
+    assert reasoning_added["data"]["output_index"] == 0
+    assert message_added["data"]["output_index"] == 0
+    assert text_delta["data"]["output_index"] == 0
+
+
+def test_translate_anthropic_tool_use_stream_to_function_call_events():
+    translator = ResponsesEventTranslator()
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "tool_use", "id": "call_1", "name": "lookup_weather", "input": {}},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": '{"city":"Sha'},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "input_json_delta", "partial_json": 'nghai"}'},
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    added = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.added" and event["data"]["item"]["type"] == "function_call"
+    )
+    arg_deltas = [
+        event["data"]["delta"] for event in events if event["event"] == "response.function_call_arguments.delta"
+    ]
+    args_done = next(event for event in events if event["event"] == "response.function_call_arguments.done")
+    item_done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "function_call"
+    )
+
+    assert added["data"]["item"]["call_id"] == "call_1"
+    assert arg_deltas == ['{"city":"Sha', 'nghai"}']
+    assert args_done["data"]["arguments"] == '{"city":"Shanghai"}'
+    assert item_done["data"]["item"]["arguments"] == '{"city":"Shanghai"}'
+
+
+def test_translate_anthropic_tool_use_with_start_input_closes_with_full_arguments():
+    translator = ResponsesEventTranslator()
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "tool_use",
+                "id": "call_2",
+                "name": "lookup_weather",
+                "input": {"city": "Shanghai"},
+            },
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    arg_deltas = [event for event in events if event["event"] == "response.function_call_arguments.delta"]
+    args_done = next(event for event in events if event["event"] == "response.function_call_arguments.done")
+
+    assert arg_deltas == []
+    assert args_done["data"]["arguments"] == '{"city": "Shanghai"}'
