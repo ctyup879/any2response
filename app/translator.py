@@ -29,6 +29,7 @@ RESPONSE_INCOMPLETE_STOP_REASONS = {
     "pause_turn": {"reason": "other"},
 }
 SUPPORTED_REASONING_SUMMARIES = {None, "auto", "concise", "detailed"}
+PROXY_REASONING_PREFIX = "proxy_reasoning_v1:"
 
 
 def _stringify(value):
@@ -116,6 +117,10 @@ def _translate_image_block(item):
 def _image_detail_instruction(detail):
     if detail in (None, "auto"):
         return None
+    if detail == "low":
+        return "Analyze the following image with low visual detail."
+    if detail == "high":
+        return "Analyze the following image with high visual detail."
     raise UnsupportedFeatureError("Unsupported Responses API feature: input_image.detail is not supported")
 
 
@@ -163,7 +168,7 @@ def _custom_tool_description(description, format_spec):
     if format_type == "grammar":
         syntax = format_spec.get("syntax")
         definition = format_spec.get("definition")
-        if syntax != "regex" or not isinstance(definition, str) or not definition.strip():
+        if syntax not in {"regex", "lark"} or not isinstance(definition, str) or not definition.strip():
             raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
         return description
     raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
@@ -176,10 +181,13 @@ def _custom_tool_input_schema(format_spec):
     elif format_type == "grammar":
         syntax = format_spec.get("syntax")
         definition = format_spec.get("definition")
-        if syntax != "regex" or not isinstance(definition, str) or not definition.strip():
+        if syntax not in {"regex", "lark"} or not isinstance(definition, str) or not definition.strip():
             raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
         input_property = {"type": "string"}
-        input_property["pattern"] = definition
+        if syntax == "regex":
+            input_property["pattern"] = definition
+        else:
+            input_property["description"] = f"Input must conform to this lark grammar:\n{definition}"
     else:
         raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
     return {
@@ -325,11 +333,6 @@ def _translate_tools(tools):
             raise UnsupportedFeatureError(
                 f"Unsupported Responses API tool type: {tool_type}"
             )
-        strict = tool.get("strict", tool.get("function", {}).get("strict"))
-        if tool_type in {None, "function"} and strict is False:
-            raise UnsupportedFeatureError(
-                "Unsupported Responses API feature: function tool strict=false is not supported"
-            )
         if tool_type == "custom":
             format_spec = tool.get("format") or {"type": "text"}
             if not isinstance(format_spec, dict):
@@ -378,7 +381,7 @@ def _normalize_include(include):
         return []
     if not isinstance(include, list):
         raise UnsupportedFeatureError("Unsupported Responses API include value")
-    allowed = {"reasoning.encrypted_content"}
+    allowed = {"reasoning.encrypted_content", "message.output_text.logprobs"}
     normalized = []
     for value in include:
         if value not in allowed:
@@ -521,7 +524,13 @@ def _normalize_reasoning_config(reasoning):
 
 
 def _output_text_logprobs(response_context=None):
-    if isinstance(response_context, dict) and response_context.get("top_logprobs") == 0:
+    if not isinstance(response_context, dict):
+        return None
+    include = response_context.get("include", [])
+    if "message.output_text.logprobs" in include:
+        return []
+    top_logprobs = response_context.get("top_logprobs")
+    if isinstance(top_logprobs, int) and not isinstance(top_logprobs, bool) and top_logprobs >= 0:
         return []
     return None
 
@@ -564,6 +573,34 @@ def _text_delta_payload(item_id, output_index, delta_text, response_context=None
     if logprobs is not None:
         payload["logprobs"] = logprobs
     return payload
+
+
+def _encode_proxy_reasoning_content(text):
+    if not isinstance(text, str) or not text:
+        return None
+    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    return f"{PROXY_REASONING_PREFIX}{encoded}"
+
+
+def _decode_proxy_reasoning_content(value):
+    if not isinstance(value, str) or not value.startswith(PROXY_REASONING_PREFIX):
+        return None
+    encoded = value[len(PROXY_REASONING_PREFIX) :]
+    try:
+        return base64.b64decode(encoded).decode("utf-8")
+    except Exception as exc:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning.encrypted_content is invalid") from exc
+
+
+def _assistant_message_item_payload(item_id, text, status, phase="final_answer", response_context=None):
+    return {
+        "id": item_id,
+        "type": "message",
+        "role": "assistant",
+        "phase": phase,
+        "status": status,
+        "content": [_output_text_part(text, response_context=response_context)],
+    }
 
 
 def _apply_assistant_phase(content_blocks, phase):
@@ -644,7 +681,7 @@ def _usage_payload(usage):
     }
 
 
-def _reasoning_encrypted_content(block, response_context=None):
+def _reasoning_encrypted_content(block, response_context=None, content_text=None):
     include = []
     if isinstance(response_context, dict):
         include = response_context.get("include", [])
@@ -654,7 +691,9 @@ def _reasoning_encrypted_content(block, response_context=None):
         value = block.get(field_name)
         if value is not None:
             return _stringify(value)
-    return None
+    if content_text is None:
+        content_text = block.get("thinking") or block.get("text") or ""
+    return _encode_proxy_reasoning_content(content_text)
 
 
 def _reasoning_summary_text(text, response_context=None):
@@ -693,6 +732,34 @@ def _reasoning_item_payload(item_id, summary_text, content_text=None, encrypted_
     if status is not None:
         item["status"] = status
     return item
+
+
+def _reasoning_input_text(item):
+    encrypted_content = item.get("encrypted_content")
+    decoded = _decode_proxy_reasoning_content(encrypted_content)
+    if decoded:
+        return decoded
+    content = item.get("content")
+    if isinstance(content, list):
+        text_parts = []
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") in {"reasoning_text", "text", "output_text"} and isinstance(part.get("text"), str):
+                text_parts.append(part["text"])
+        if text_parts:
+            return "".join(text_parts)
+    summary = item.get("summary")
+    if isinstance(summary, list):
+        text_parts = []
+        for part in summary:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "summary_text" and isinstance(part.get("text"), str):
+                text_parts.append(part["text"])
+        if text_parts:
+            return " ".join(text_parts)
+    raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning input items require content or encrypted_content")
 
 
 def _normalize_response_tools(tools):
@@ -1067,7 +1134,9 @@ def translate_responses_request(body):
     _normalize_include(body.get("include"))
     _normalize_stream_options(body.get("stream_options"), body.get("stream", True))
     top_logprobs = body.get("top_logprobs")
-    if top_logprobs not in (None, 0):
+    if top_logprobs is not None and (
+        not isinstance(top_logprobs, int) or isinstance(top_logprobs, bool) or top_logprobs < 0
+    ):
         raise UnsupportedFeatureError("Unsupported Responses API feature: top_logprobs is not supported")
 
     result = {
@@ -1168,8 +1237,6 @@ def translate_responses_request(body):
 
         item_type = item.get("type") or ("message" if item.get("role") else None)
         if item_type == "message":
-            flush_assistant()
-            flush_tool_results()
             role = item.get("role", "user")
             if role not in {"user", "assistant", "developer", "system"}:
                 raise UnsupportedFeatureError("Unsupported Responses API feature: message role is not supported")
@@ -1179,6 +1246,8 @@ def translate_responses_request(body):
             if phase is not None and role != "assistant":
                 raise UnsupportedFeatureError("Unsupported Responses API feature: message phase is only supported for assistant messages")
             if role in {"developer", "system"}:
+                flush_assistant()
+                flush_tool_results()
                 developer_blocks = _translate_content_blocks(item.get("content", []))
                 if any(block.get("type") != "text" for block in developer_blocks):
                     raise UnsupportedFeatureError(
@@ -1188,9 +1257,15 @@ def translate_responses_request(body):
                 if developer_text:
                     system_segments.append(developer_text)
                 continue
+            if role == "user":
+                flush_assistant()
+                flush_tool_results()
             translated_content = _translate_content_blocks(item.get("content", []))
             if role == "assistant":
+                flush_tool_results()
                 translated_content = _apply_assistant_phase(translated_content, phase)
+                current_assistant_blocks.extend(translated_content)
+                continue
             result["messages"].append({"role": role, "content": translated_content})
             continue
 
@@ -1263,7 +1338,14 @@ def translate_responses_request(body):
             continue
 
         if item_type == "reasoning":
-            raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning input items are not supported")
+            flush_tool_results()
+            current_assistant_blocks.append(
+                {
+                    "type": "thinking",
+                    "thinking": _reasoning_input_text(item),
+                }
+            )
+            continue
 
         if item_type == "item_reference":
             raise UnsupportedFeatureError("Unsupported Responses API feature: item_reference is not supported")
@@ -1309,7 +1391,8 @@ def translate_anthropic_response(body, model, response_context=None):
     created_at = int(time.time())
     completed_at = int(time.time())
     output = []
-    output_text_parts = []
+    final_text_parts = []
+    commentary_text_parts = []
     parallel_tool_calls = True if response_context is None else response_context.get("parallel_tool_calls", True)
     tool_call_seen = False
     response_status, incomplete_details = _response_completion_from_stop_reason(body.get("stop_reason"))
@@ -1321,7 +1404,11 @@ def translate_anthropic_response(body, model, response_context=None):
         if block_type in {"thinking", "redacted_thinking"}:
             content_text = block.get("thinking") or block.get("text") or ""
             summary_text = _reasoning_summary_text(content_text, response_context=response_context)
-            encrypted_content = _reasoning_encrypted_content(block, response_context=response_context)
+            encrypted_content = _reasoning_encrypted_content(
+                block,
+                response_context=response_context,
+                content_text=content_text,
+            )
             output.append(
                 _reasoning_item_payload(
                     f"rs_{response_id}_{index}",
@@ -1331,18 +1418,27 @@ def translate_anthropic_response(body, model, response_context=None):
                     status=reasoning_status,
                 )
             )
+            commentary_text_parts.append(content_text)
+            output.append(
+                _assistant_message_item_payload(
+                    f"msg_{response_id}_commentary_{index}",
+                    content_text,
+                    reasoning_status,
+                    phase="commentary",
+                    response_context=response_context,
+                )
+            )
         elif block_type == "text":
             text = block.get("text", "")
-            output_text_parts.append(text)
+            final_text_parts.append(text)
             output.append(
-                {
-                    "id": f"msg_{response_id}_{index}",
-                    "type": "message",
-                    "role": "assistant",
-                    "phase": "final_answer",
-                    "status": message_status,
-                    "content": [_output_text_part(text, response_context=response_context)],
-                }
+                _assistant_message_item_payload(
+                    f"msg_{response_id}_{index}",
+                    text,
+                    message_status,
+                    phase="final_answer",
+                    response_context=response_context,
+                )
             )
         elif block_type == "tool_use":
             if not parallel_tool_calls and tool_call_seen:
@@ -1370,7 +1466,7 @@ def translate_anthropic_response(body, model, response_context=None):
         "error": None,
         "incomplete_details": incomplete_details,
         "output": output,
-        "output_text": "".join(output_text_parts),
+        "output_text": "".join(final_text_parts if final_text_parts else commentary_text_parts),
         "usage": _usage_payload(body.get("usage", {})),
     }
     if response_context:
@@ -1391,6 +1487,10 @@ class ResponsesEventTranslator:
         self.message_added = set()
         self.content_added = set()
         self.message_done = set()
+        self.commentary_buffers = {}
+        self.commentary_added = set()
+        self.commentary_content_added = set()
+        self.commentary_done = set()
         self.reasoning_buffers = {}
         self.reasoning_summary_buffers = {}
         self.reasoning_added = set()
@@ -1403,6 +1503,11 @@ class ResponsesEventTranslator:
         self.ignored_tool_indexes = set()
         self.usage = {}
         self.stop_reason = None
+        self.next_output_index = 0
+        self.reasoning_index = None
+        self.commentary_index = None
+        self.final_message_index = None
+        self.tool_output_indexes = {}
 
     def _include_obfuscation(self):
         stream_options = self.response_context.get("stream_options") or {}
@@ -1414,8 +1519,30 @@ class ResponsesEventTranslator:
             data["obfuscation"] = secrets.token_hex(4)
         return data
 
-    def _assistant_output_index(self):
-        return 0
+    def _allocate_output_index(self):
+        output_index = self.next_output_index
+        self.next_output_index += 1
+        return output_index
+
+    def _reasoning_output_index(self):
+        if self.reasoning_index is None:
+            self.reasoning_index = self._allocate_output_index()
+        return self.reasoning_index
+
+    def _commentary_output_index(self):
+        if self.commentary_index is None:
+            self.commentary_index = self._allocate_output_index()
+        return self.commentary_index
+
+    def _final_message_output_index(self):
+        if self.final_message_index is None:
+            self.final_message_index = self._allocate_output_index()
+        return self.final_message_index
+
+    def _tool_output_index(self, index):
+        if index not in self.tool_output_indexes:
+            self.tool_output_indexes[index] = self._allocate_output_index()
+        return self.tool_output_indexes[index]
 
     def _final_response_status(self):
         return _response_completion_from_stop_reason(self.stop_reason)[0]
@@ -1438,43 +1565,72 @@ class ResponsesEventTranslator:
     def _message_id(self, index):
         return f"msg_{self.response_id}_{index}"
 
+    def _commentary_message_id(self, index):
+        return f"msg_{self.response_id}_commentary_{index}"
+
     def _tool_item_id(self, call_id):
         return f"fc_{call_id}"
 
     def _build_output_items(self):
         items = []
-        assistant_index = self._assistant_output_index()
-        if assistant_index in self.reasoning_added:
-            full_text = self.reasoning_buffers.get(assistant_index, "")
+        if self.reasoning_index in self.reasoning_added:
+            full_text = self.reasoning_buffers.get(self.reasoning_index, "")
             summary_text = self.reasoning_summary_buffers.get(
-                assistant_index,
+                self.reasoning_index,
                 _reasoning_summary_text(full_text, response_context=self.response_context),
             )
-            encrypted_content = self.reasoning_encrypted.get(assistant_index)
-            items.append(
-                _reasoning_item_payload(
-                    f"rs_{self.response_id}_{assistant_index}",
-                    summary_text,
+            encrypted_content = self.reasoning_encrypted.get(self.reasoning_index)
+            if encrypted_content is None:
+                encrypted_content = _reasoning_encrypted_content(
+                    {},
+                    response_context=self.response_context,
                     content_text=full_text,
-                    encrypted_content=encrypted_content,
-                    status=(
-                        self._final_reasoning_status()
-                        if assistant_index in self.reasoning_done
-                        else "in_progress"
+                )
+                if encrypted_content is not None:
+                    self.reasoning_encrypted[self.reasoning_index] = encrypted_content
+            items.append(
+                (
+                    self.reasoning_index,
+                    _reasoning_item_payload(
+                        f"rs_{self.response_id}_{self.reasoning_index}",
+                        summary_text,
+                        content_text=full_text,
+                        encrypted_content=encrypted_content,
+                        status=(
+                            self._final_reasoning_status()
+                            if self.reasoning_index in self.reasoning_done
+                            else "in_progress"
+                        ),
                     ),
                 )
             )
-        if assistant_index in self.message_added:
-            text = self.text_buffers.get(assistant_index, "")
+        if self.commentary_index in self.commentary_added:
+            text = self.commentary_buffers.get(self.commentary_index, "")
             items.append(
-                {
-                    "id": self._message_id(assistant_index),
-                    "type": "message",
-                    "role": "assistant",
-                    "phase": "final_answer",
-                    "status": self._final_message_status() if assistant_index in self.message_done else "in_progress",
-                    "content": [_output_text_part(text, response_context=self.response_context)],
-                }
+                (
+                    self.commentary_index,
+                    _assistant_message_item_payload(
+                        self._commentary_message_id(self.commentary_index),
+                        text,
+                        self._final_reasoning_status() if self.commentary_index in self.commentary_done else "in_progress",
+                        phase="commentary",
+                        response_context=self.response_context,
+                    ),
+                )
+            )
+        if self.final_message_index in self.message_added:
+            text = self.text_buffers.get(self.final_message_index, "")
+            items.append(
+                (
+                    self.final_message_index,
+                    _assistant_message_item_payload(
+                        self._message_id(self.final_message_index),
+                        text,
+                        self._final_message_status() if self.final_message_index in self.message_done else "in_progress",
+                        phase="final_answer",
+                        response_context=self.response_context,
+                    ),
+                )
             )
         for index in sorted(self.tool_calls):
             call = self.tool_calls[index]
@@ -1482,15 +1638,19 @@ class ResponsesEventTranslator:
             args = self.tool_args.get(index, "") or self.tool_seed_args.get(index, "{}")
             args = _serialized_tool_payload(call["name"], args, response_context=self.response_context)
             items.append(
-                _tool_item_payload(
-                    call_id,
-                    call["name"],
-                    args,
-                    "completed" if index in self.tool_done else "in_progress",
-                    response_context=self.response_context,
+                (
+                    call["output_index"],
+                    _tool_item_payload(
+                        call_id,
+                        call["name"],
+                        args,
+                        "completed" if index in self.tool_done else "in_progress",
+                        response_context=self.response_context,
+                    ),
                 )
             )
-        return items
+        items.sort(key=lambda pair: pair[0])
+        return [item for _, item in items]
 
     def _response_payload(self, status, include_output=False, include_usage=False, include_completed_at=False):
         payload = {
@@ -1532,9 +1692,16 @@ class ResponsesEventTranslator:
         else:
             payload["usage"] = None
         if include_output:
-            payload["output_text"] = "".join(
-                self.text_buffers.get(idx, "") for idx in sorted(self.message_added)
-            )
+            if self.message_added:
+                payload["output_text"] = "".join(
+                    self.text_buffers.get(idx, "") for idx in sorted(self.message_added)
+                )
+            elif self.commentary_added:
+                payload["output_text"] = "".join(
+                    self.commentary_buffers.get(idx, "") for idx in sorted(self.commentary_added)
+                )
+            else:
+                payload["output_text"] = ""
         if include_completed_at:
             payload["completed_at"] = int(time.time())
         return payload
@@ -1560,12 +1727,10 @@ class ResponsesEventTranslator:
             ),
         ]
 
-    def _ensure_text_started(self, index):
-        index = self._assistant_output_index()
+    def _ensure_message_started(self, index, phase, added_set, content_added_set, message_id):
         events = []
-        msg_id = self._message_id(index)
-        if index not in self.message_added:
-            self.message_added.add(index)
+        if index not in added_set:
+            added_set.add(index)
             events.append(
                 self._emit(
                     "response.output_item.added",
@@ -1573,24 +1738,24 @@ class ResponsesEventTranslator:
                         "type": "response.output_item.added",
                         "output_index": index,
                         "item": {
-                            "id": msg_id,
+                            "id": message_id,
                             "type": "message",
                             "role": "assistant",
-                            "phase": "final_answer",
+                            "phase": phase,
                             "status": "in_progress",
                             "content": [],
                         },
                     },
                 )
             )
-        if index not in self.content_added:
-            self.content_added.add(index)
+        if index not in content_added_set:
+            content_added_set.add(index)
             events.append(
                 self._emit(
                     "response.content_part.added",
                     {
                         "type": "response.content_part.added",
-                        "item_id": msg_id,
+                        "item_id": message_id,
                         "output_index": index,
                         "content_index": 0,
                         "part": _output_text_part("", response_context=self.response_context),
@@ -1599,23 +1764,41 @@ class ResponsesEventTranslator:
             )
         return events
 
-    def _close_text(self, index):
-        index = self._assistant_output_index()
-        if index in self.message_done:
+    def _ensure_text_started(self, index):
+        index = self._final_message_output_index()
+        return self._ensure_message_started(
+            index,
+            "final_answer",
+            self.message_added,
+            self.content_added,
+            self._message_id(index),
+        )
+
+    def _ensure_commentary_started(self, index):
+        index = self._commentary_output_index()
+        return self._ensure_message_started(
+            index,
+            "commentary",
+            self.commentary_added,
+            self.commentary_content_added,
+            self._commentary_message_id(index),
+        )
+
+    def _close_message(self, index, phase, buffers, done_set, message_id, final_status):
+        if index in done_set:
             return []
-        self.message_done.add(index)
-        text = self.text_buffers.get(index, "")
-        msg_id = self._message_id(index)
+        done_set.add(index)
+        text = buffers.get(index, "")
         return [
             self._emit(
                 "response.output_text.done",
-                _text_done_payload(msg_id, index, text, response_context=self.response_context),
+                _text_done_payload(message_id, index, text, response_context=self.response_context),
             ),
             self._emit(
                 "response.content_part.done",
                 {
                     "type": "response.content_part.done",
-                    "item_id": msg_id,
+                    "item_id": message_id,
                     "output_index": index,
                     "content_index": 0,
                     "part": _output_text_part(text, response_context=self.response_context),
@@ -1626,20 +1809,41 @@ class ResponsesEventTranslator:
                 {
                     "type": "response.output_item.done",
                     "output_index": index,
-                        "item": {
-                            "id": msg_id,
-                            "type": "message",
-                            "role": "assistant",
-                            "phase": "final_answer",
-                            "status": self._final_message_status(),
-                            "content": [_output_text_part(text, response_context=self.response_context)],
-                    },
+                    "item": _assistant_message_item_payload(
+                        message_id,
+                        text,
+                        final_status,
+                        phase=phase,
+                        response_context=self.response_context,
+                    ),
                 },
             ),
         ]
 
+    def _close_text(self, index):
+        index = self._final_message_output_index()
+        return self._close_message(
+            index,
+            "final_answer",
+            self.text_buffers,
+            self.message_done,
+            self._message_id(index),
+            self._final_message_status(),
+        )
+
+    def _close_commentary(self, index):
+        index = self._commentary_output_index()
+        return self._close_message(
+            index,
+            "commentary",
+            self.commentary_buffers,
+            self.commentary_done,
+            self._commentary_message_id(index),
+            self._final_reasoning_status(),
+        )
+
     def _ensure_reasoning_started(self, index):
-        index = self._assistant_output_index()
+        index = self._reasoning_output_index()
         if index in self.reasoning_added:
             return []
         self.reasoning_added.add(index)
@@ -1670,7 +1874,7 @@ class ResponsesEventTranslator:
         ]
 
     def _close_reasoning(self, index):
-        index = self._assistant_output_index()
+        index = self._reasoning_output_index()
         if index not in self.reasoning_added or index in self.reasoning_done:
             return []
         self.reasoning_done.add(index)
@@ -1681,6 +1885,14 @@ class ResponsesEventTranslator:
             _reasoning_summary_text(full_text, response_context=self.response_context),
         )
         encrypted_content = self.reasoning_encrypted.get(index)
+        if encrypted_content is None:
+            encrypted_content = _reasoning_encrypted_content(
+                {},
+                response_context=self.response_context,
+                content_text=full_text,
+            )
+            if encrypted_content is not None:
+                self.reasoning_encrypted[index] = encrypted_content
         return [
             self._emit(
                 "response.reasoning_summary_text.done",
@@ -1724,6 +1936,7 @@ class ResponsesEventTranslator:
         self.tool_done.add(index)
         call = self.tool_calls[index]
         call_id = call["call_id"]
+        output_index = call["output_index"]
         args = self.tool_args.get(index, "") or self.tool_seed_args.get(index, "{}")
         args = _serialized_tool_payload(call["name"], args, response_context=self.response_context)
         event_spec = _tool_stream_event_spec(call, response_context=self.response_context)
@@ -1734,7 +1947,7 @@ class ResponsesEventTranslator:
                 {
                     "type": event_spec["done_event"],
                     "item_id": self._tool_item_id(call_id),
-                    "output_index": index,
+                    "output_index": output_index,
                     event_spec["field_name"]: final_value,
                 },
             ),
@@ -1742,7 +1955,7 @@ class ResponsesEventTranslator:
                 "response.output_item.done",
                 {
                     "type": "response.output_item.done",
-                    "output_index": index,
+                    "output_index": output_index,
                     "item": _tool_item_payload(
                         call_id,
                         call["name"],
@@ -1791,10 +2004,17 @@ class ResponsesEventTranslator:
             if block.get("type") == "text":
                 events.extend(self._ensure_text_started(index))
             elif block.get("type") == "thinking":
-                encrypted_content = _reasoning_encrypted_content(block, response_context=self.response_context)
+                reasoning_index = self._reasoning_output_index()
+                commentary_index = self._commentary_output_index()
+                encrypted_content = _reasoning_encrypted_content(
+                    block,
+                    response_context=self.response_context,
+                    content_text=block.get("thinking") or block.get("text") or "",
+                )
                 if encrypted_content is not None:
-                    self.reasoning_encrypted[self._assistant_output_index()] = encrypted_content
-                events.extend(self._ensure_reasoning_started(index))
+                    self.reasoning_encrypted[reasoning_index] = encrypted_content
+                events.extend(self._ensure_reasoning_started(reasoning_index))
+                events.extend(self._ensure_commentary_started(commentary_index))
             elif block.get("type") == "tool_use":
                 if not self.response_context.get("parallel_tool_calls", True) and self.tool_calls:
                     raise UnsupportedFeatureError(
@@ -1802,7 +2022,8 @@ class ResponsesEventTranslator:
                     )
                 call_id = block.get("id", f"call_{uuid.uuid4().hex[:8]}")
                 name = block.get("name", "")
-                self.tool_calls[index] = {"call_id": call_id, "name": name}
+                output_index = self._tool_output_index(index)
+                self.tool_calls[index] = {"call_id": call_id, "name": name, "output_index": output_index}
                 self.tool_args[index] = ""
                 self.tool_seed_args[index] = json.dumps(block.get("input", {}), ensure_ascii=False)
                 events.append(
@@ -1810,7 +2031,7 @@ class ResponsesEventTranslator:
                         "response.output_item.added",
                         {
                             "type": "response.output_item.added",
-                            "output_index": index,
+                            "output_index": output_index,
                             "item": _tool_item_payload(
                                 call_id,
                                 name,
@@ -1829,16 +2050,16 @@ class ResponsesEventTranslator:
             delta_type = delta.get("type")
             if delta_type == "text_delta":
                 text = delta.get("text", "")
-                index = self._assistant_output_index()
-                self.text_buffers[index] = self.text_buffers.get(index, "") + text
-                events.extend(self._ensure_text_started(index))
+                output_index = self._final_message_output_index()
+                self.text_buffers[output_index] = self.text_buffers.get(output_index, "") + text
+                events.extend(self._ensure_text_started(output_index))
                 events.append(
                     self._emit(
                         "response.output_text.delta",
                         self._delta_payload(
                             _text_delta_payload(
-                                self._message_id(index),
-                                index,
+                                self._message_id(output_index),
+                                output_index,
                                 text,
                                 response_context=self.response_context,
                             )
@@ -1848,16 +2069,32 @@ class ResponsesEventTranslator:
                 return events
             if delta_type == "thinking_delta":
                 text = delta.get("thinking", "")
-                index = self._assistant_output_index()
-                self.reasoning_buffers[index] = self.reasoning_buffers.get(index, "") + text
-                events.extend(self._ensure_reasoning_started(index))
+                reasoning_index = self._reasoning_output_index()
+                commentary_index = self._commentary_output_index()
+                self.reasoning_buffers[reasoning_index] = self.reasoning_buffers.get(reasoning_index, "") + text
+                self.commentary_buffers[commentary_index] = self.commentary_buffers.get(commentary_index, "") + text
+                events.extend(self._ensure_reasoning_started(reasoning_index))
+                events.extend(self._ensure_commentary_started(commentary_index))
                 summary_text = _reasoning_summary_text(
-                    self.reasoning_buffers[index],
+                    self.reasoning_buffers[reasoning_index],
                     response_context=self.response_context,
                 )
-                previous_summary = self.reasoning_summary_buffers.get(index, "")
-                self.reasoning_summary_buffers[index] = summary_text
+                previous_summary = self.reasoning_summary_buffers.get(reasoning_index, "")
+                self.reasoning_summary_buffers[reasoning_index] = summary_text
                 summary_delta = summary_text[len(previous_summary):] if summary_text.startswith(previous_summary) else summary_text
+                events.append(
+                    self._emit(
+                        "response.output_text.delta",
+                        self._delta_payload(
+                            _text_delta_payload(
+                                self._commentary_message_id(commentary_index),
+                                commentary_index,
+                                text,
+                                response_context=self.response_context,
+                            )
+                        ),
+                    )
+                )
                 if summary_delta:
                     events.append(
                         self._emit(
@@ -1865,8 +2102,8 @@ class ResponsesEventTranslator:
                             self._delta_payload(
                                 {
                                 "type": "response.reasoning_summary_text.delta",
-                                "item_id": f"rs_{self.response_id}_{index}",
-                                "output_index": index,
+                                "item_id": f"rs_{self.response_id}_{reasoning_index}",
+                                "output_index": reasoning_index,
                                 "summary_index": 0,
                                 "delta": summary_delta,
                                 }
@@ -1879,9 +2116,10 @@ class ResponsesEventTranslator:
                     return events
                 partial = delta.get("partial_json", "")
                 self.tool_args[index] = self.tool_args.get(index, "") + partial
-                call_id = self.tool_calls[index]["call_id"]
+                call = self.tool_calls[index]
+                call_id = call["call_id"]
                 event_spec = _tool_stream_event_spec(
-                    self.tool_calls[index],
+                    call,
                     response_context=self.response_context,
                 )
                 events.append(
@@ -1891,7 +2129,7 @@ class ResponsesEventTranslator:
                             {
                             "type": event_spec["delta_event"],
                             "item_id": self._tool_item_id(call_id),
-                            "output_index": index,
+                            "output_index": call["output_index"],
                             "delta": partial,
                             }
                         ),
@@ -1915,6 +2153,8 @@ class ResponsesEventTranslator:
             return events
 
         if event_type == "message_stop":
+            for index in sorted(self.commentary_added):
+                events.extend(self._close_commentary(index))
             for index in sorted(self.message_added):
                 events.extend(self._close_text(index))
             for index in sorted(self.reasoning_added):
@@ -1928,6 +2168,8 @@ class ResponsesEventTranslator:
 
     def finish(self):
         events = []
+        for index in sorted(self.commentary_added):
+            events.extend(self._close_commentary(index))
         for index in sorted(self.message_added):
             events.extend(self._close_text(index))
         for index in sorted(self.reasoning_added):

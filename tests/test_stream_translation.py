@@ -127,6 +127,61 @@ def test_translate_anthropic_thinking_block_to_reasoning_events():
     assert "response.output_item.done" in event_types
 
 
+def test_translate_anthropic_thinking_block_emits_commentary_message_events():
+    translator = ResponsesEventTranslator()
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Planning"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    commentary_added = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.added"
+        and event["data"]["item"]["type"] == "message"
+        and event["data"]["item"].get("phase") == "commentary"
+    )
+    commentary_delta = next(
+        event
+        for event in events
+        if event["event"] == "response.output_text.delta" and event["data"]["item_id"] == commentary_added["data"]["item"]["id"]
+    )
+    commentary_done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done"
+        and event["data"]["item"]["type"] == "message"
+        and event["data"]["item"].get("phase") == "commentary"
+    )
+    completed = next(event for event in events if event["event"] == "response.completed")
+
+    assert commentary_delta["data"]["delta"] == "Planning"
+    assert commentary_done["data"]["item"]["content"][0]["text"] == "Planning"
+    commentary_messages = [
+        item
+        for item in completed["data"]["response"]["output"]
+        if item.get("type") == "message" and item.get("phase") == "commentary"
+    ]
+    assert len(commentary_messages) == 1
+    assert commentary_messages[0]["content"][0]["text"] == "Planning"
+
+
 def test_translate_anthropic_thinking_block_uses_concise_summary_when_requested():
     translator = ResponsesEventTranslator(
         response_context={"reasoning": {"effort": "high", "summary": "concise"}},
@@ -193,7 +248,7 @@ def test_translate_anthropic_thinking_block_emits_reasoning_encrypted_content_wh
     assert completed["data"]["response"]["output"][0]["encrypted_content"] == "enc_sig_456"
 
 
-def test_translate_anthropic_thinking_block_omits_reasoning_encrypted_content_when_missing_upstream_field():
+def test_translate_anthropic_thinking_block_generates_proxy_reasoning_encrypted_content_when_upstream_missing():
     translator = ResponsesEventTranslator(
         response_context={"include": ["reasoning.encrypted_content"]},
     )
@@ -224,10 +279,44 @@ def test_translate_anthropic_thinking_block_omits_reasoning_encrypted_content_wh
         if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "reasoning"
     )
 
-    assert "encrypted_content" not in done["data"]["item"]
+    assert done["data"]["item"]["encrypted_content"].startswith("proxy_reasoning_v1:")
 
 
-def test_translate_anthropic_reasoning_and_text_share_same_output_index():
+def test_translate_anthropic_thinking_block_generates_proxy_encrypted_content_when_requested():
+    translator = ResponsesEventTranslator(
+        response_context={"include": ["reasoning.encrypted_content"]},
+    )
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Plan carefully before acting."},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "reasoning"
+    )
+
+    assert done["data"]["item"]["encrypted_content"].startswith("proxy_reasoning_v1:")
+
+
+def test_translate_anthropic_reasoning_commentary_and_final_answer_use_distinct_output_indexes():
     translator = ResponsesEventTranslator()
     events = []
 
@@ -262,16 +351,19 @@ def test_translate_anthropic_reasoning_and_text_share_same_output_index():
         events.extend(translator.feed(item))
 
     reasoning_added = next(event for event in events if event["event"] == "response.output_item.added")
-    message_added = next(
+    message_events = [
         event
         for event in events
         if event["event"] == "response.output_item.added" and event["data"]["item"]["type"] == "message"
-    )
-    text_delta = next(event for event in events if event["event"] == "response.output_text.delta")
+    ]
+    commentary_added = next(event for event in message_events if event["data"]["item"].get("phase") == "commentary")
+    final_added = next(event for event in message_events if event["data"]["item"].get("phase") == "final_answer")
+    text_deltas = [event for event in events if event["event"] == "response.output_text.delta"]
 
     assert reasoning_added["data"]["output_index"] == 0
-    assert message_added["data"]["output_index"] == 0
-    assert text_delta["data"]["output_index"] == 0
+    assert commentary_added["data"]["output_index"] == 1
+    assert final_added["data"]["output_index"] == 2
+    assert [event["data"]["output_index"] for event in text_deltas] == [1, 2]
 
 
 def test_translate_anthropic_stream_omits_obfuscation_when_disabled():
