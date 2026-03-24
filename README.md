@@ -16,6 +16,30 @@ cp .env.example .env
 ./start_proxy.sh
 ```
 
+## Run As a User Service
+
+Install the user unit:
+
+```bash
+python3 scripts/install_user_service.py
+systemctl --user daemon-reload
+systemctl --user enable --now minimaxdemo-proxy.service
+```
+
+Inspect it:
+
+```bash
+systemctl --user status minimaxdemo-proxy.service --no-pager
+journalctl --user -u minimaxdemo-proxy.service -n 50 --no-pager
+```
+
+Stop or disable it:
+
+```bash
+systemctl --user stop minimaxdemo-proxy.service
+systemctl --user disable minimaxdemo-proxy.service
+```
+
 ## Test
 
 ```bash
@@ -25,6 +49,12 @@ cp .env.example .env
 ## Codex
 
 Profile name: `m128py`
+
+Install local model metadata once so Codex does not fall back to generic metadata:
+
+```bash
+python3 scripts/install_codex_metadata.py
+```
 
 ## Protocol Coverage
 
