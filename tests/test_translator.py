@@ -123,25 +123,37 @@ def test_translate_responses_request_supports_custom_tools_with_grammar_format()
     ]
 
 
-def test_translate_responses_request_rejects_lark_custom_tool_format():
-    with pytest.raises(UnsupportedFeatureError, match="custom tool format"):
-        translate_responses_request(
-            {
-                "model": "codex-MiniMax-M2.7",
-                "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
-                "tools": [
-                    {
-                        "type": "custom",
-                        "name": "matcher",
-                        "format": {
-                            "type": "grammar",
-                            "syntax": "lark",
-                            "definition": "start: WORD",
-                        },
-                    }
-                ],
-            }
-        )
+def test_translate_responses_request_accepts_lark_custom_tool_format():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "matcher",
+                    "format": {
+                        "type": "grammar",
+                        "syntax": "lark",
+                        "definition": "start: WORD",
+                    },
+                }
+            ],
+        }
+    )
+
+    assert translated["tools"] == [
+        {
+            "name": "matcher",
+            "description": "Input grammar (lark):\nstart: WORD",
+            "input_schema": {
+                "type": "object",
+                "properties": {"input": {"type": "string"}},
+                "required": ["input"],
+                "additionalProperties": False,
+            },
+        }
+    ]
 
 
 def test_translate_responses_request_skips_nameless_hosted_tools():
@@ -224,56 +236,21 @@ def test_translate_responses_request_rejects_invalid_message_phase():
         )
 
 
-def test_translate_responses_request_accepts_final_answer_message_phase():
-    translated = translate_responses_request(
-        {
-            "model": "codex-MiniMax-M2.7",
-            "input": [
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "phase": "final_answer",
-                    "content": [{"type": "output_text", "text": "Done"}],
-                }
-            ],
-        }
-    )
-
-    assert translated["messages"] == [
-        {
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "[assistant phase: final_answer]"},
-                {"type": "text", "text": "Done"},
-            ],
-        }
-    ]
-
-
-def test_translate_responses_request_preserves_commentary_message_phase():
-    translated = translate_responses_request(
-        {
-            "model": "codex-MiniMax-M2.7",
-            "input": [
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "phase": "commentary",
-                    "content": [{"type": "output_text", "text": "Thinking"}],
-                }
-            ],
-        }
-    )
-
-    assert translated["messages"] == [
-        {
-            "role": "assistant",
-            "content": [
-                {"type": "text", "text": "[assistant phase: commentary]"},
-                {"type": "text", "text": "Thinking"},
-            ],
-        }
-    ]
+def test_translate_responses_request_rejects_assistant_message_phase():
+    with pytest.raises(UnsupportedFeatureError, match="message phase"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "phase": "final_answer",
+                        "content": [{"type": "output_text", "text": "Done"}],
+                    }
+                ],
+            }
+        )
 
 
 def test_translate_responses_request_rejects_unknown_message_role():
@@ -626,6 +603,113 @@ def test_translate_responses_request_accepts_shell_call_output_items():
     ]
 
 
+def test_translate_responses_request_preserves_shell_environment():
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "tools": [
+            {
+                "type": "shell",
+                "name": "shell",
+                "description": "Run shell commands",
+                "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+            }
+        ],
+        "input": [
+            {
+                "type": "shell_call",
+                "call_id": "call_shell",
+                "action": {"commands": ["pwd"], "timeout_ms": 1000},
+                "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+            }
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["tools"][0]["description"].startswith("Run shell commands")
+    assert '"type": "local"' in translated["tools"][0]["description"]
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "call_shell",
+                    "name": "shell",
+                    "input": {
+                        "action": {"commands": ["pwd"], "timeout_ms": 1000},
+                        "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+                    },
+                },
+            ],
+        }
+    ]
+
+
+def test_translate_responses_request_maps_failed_apply_patch_call_output_to_error_tool_result():
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": [
+            {
+                "type": "apply_patch_call",
+                "call_id": "call_patch",
+                "operation": {
+                    "type": "update_file",
+                    "path": "README.md",
+                    "diff": "*** Begin Patch\n*** End Patch\n",
+                },
+            },
+            {
+                "type": "apply_patch_call_output",
+                "call_id": "call_patch",
+                "status": "failed",
+                "output": "patch failed",
+            },
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["messages"][1]["content"] == [
+        {
+            "type": "tool_result",
+            "tool_use_id": "call_patch",
+            "content": "patch failed",
+            "is_error": True,
+        }
+    ]
+
+
+def test_translate_responses_request_maps_failed_shell_call_output_to_error_tool_result():
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": [
+            {
+                "type": "shell_call",
+                "call_id": "call_shell",
+                "action": {"commands": ["pwd"]},
+            },
+            {
+                "type": "shell_call_output",
+                "call_id": "call_shell",
+                "status": "failed",
+                "output": "permission denied",
+            },
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["messages"][1]["content"] == [
+        {
+            "type": "tool_result",
+            "tool_use_id": "call_shell",
+            "content": "permission denied",
+            "is_error": True,
+        }
+    ]
+
+
 def test_translate_responses_request_filters_orphan_tool_results():
     request_body = {
         "model": "codex-MiniMax-M2.7",
@@ -788,6 +872,41 @@ def test_translate_anthropic_response_maps_shell_tool_use_to_builtin_call():
             "type": "shell_call",
             "call_id": "call_shell",
             "action": {"commands": ["pwd"], "timeout_ms": 1000, "max_output_length": 4096},
+            "status": "completed",
+        }
+    ]
+
+
+def test_translate_anthropic_response_maps_shell_environment_to_builtin_call():
+    body = {
+        "id": "msg_tool",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "call_shell",
+                "name": "shell",
+                "input": {
+                    "action": {"commands": ["pwd"]},
+                    "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+                },
+            },
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    translated = translate_anthropic_response(
+        body,
+        "codex-MiniMax-M2.7",
+        response_context={"tools": [{"type": "shell", "name": "shell"}]},
+    )
+
+    assert translated["output"] == [
+        {
+            "id": "fc_call_shell",
+            "type": "shell_call",
+            "call_id": "call_shell",
+            "action": {"commands": ["pwd"]},
+            "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
             "status": "completed",
         }
     ]
@@ -1504,6 +1623,35 @@ def test_translate_responses_request_accepts_reasoning_summary_control():
 
     assert translated["thinking"] == {"type": "enabled", "budget_tokens": 3200}
     assert response_context["reasoning"] == {"effort": "high", "summary": "concise"}
+
+
+def test_translate_responses_request_accepts_lark_custom_tool_format_best_effort():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "dsl_tool",
+                    "description": "Run a DSL command",
+                    "format": {"type": "grammar", "syntax": "lark", "definition": "start: WORD"},
+                }
+            ],
+        }
+    )
+
+    assert translated["tools"] == [
+        {
+            "name": "dsl_tool",
+            "description": "Run a DSL command\n\nInput grammar (lark):\nstart: WORD",
+            "input_schema": {
+                "type": "object",
+                "properties": {"input": {"type": "string"}},
+                "required": ["input"],
+                "additionalProperties": False,
+            },
+        }
+    ]
 
 
 def test_translate_responses_request_rejects_invalid_reasoning_effort():

@@ -146,6 +146,7 @@ def _builtin_tool_input_schema(tool_type):
                     "required": ["commands"],
                     "additionalProperties": False,
                 },
+                "environment": {"type": "object"},
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -161,8 +162,11 @@ def _custom_tool_description(description, format_spec):
     if format_type == "grammar":
         syntax = format_spec.get("syntax")
         definition = format_spec.get("definition")
-        if syntax != "regex" or not isinstance(definition, str) or not definition.strip():
+        if syntax not in {"regex", "lark"} or not isinstance(definition, str) or not definition.strip():
             raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
+        if syntax == "lark":
+            prefix = f"{description}\n\n" if description else ""
+            return f"{prefix}Input grammar (lark):\n{definition}"
         return description
     raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
 
@@ -174,9 +178,11 @@ def _custom_tool_input_schema(format_spec):
     elif format_type == "grammar":
         syntax = format_spec.get("syntax")
         definition = format_spec.get("definition")
-        if syntax != "regex" or not isinstance(definition, str) or not definition.strip():
+        if syntax not in {"regex", "lark"} or not isinstance(definition, str) or not definition.strip():
             raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
-        input_property = {"type": "string", "pattern": definition}
+        input_property = {"type": "string"}
+        if syntax == "regex":
+            input_property["pattern"] = definition
     else:
         raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
     return {
@@ -187,10 +193,12 @@ def _custom_tool_input_schema(format_spec):
     }
 
 
-def _assistant_phase_prefix(phase, role):
-    if role != "assistant" or phase is None:
-        return []
-    return [{"type": "text", "text": f"[assistant phase: {phase}]"}]
+def _normalize_shell_environment(environment):
+    if environment is None:
+        return None
+    if not isinstance(environment, dict):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
+    return environment
 
 
 def _translate_file_block(item):
@@ -300,6 +308,17 @@ def _translate_tool_result_content(value):
     return _stringify(value)
 
 
+def _builtin_tool_description(tool_type, description, environment=None):
+    description = description or ""
+    if tool_type != "shell":
+        return description
+    environment = _normalize_shell_environment(environment)
+    if environment is None:
+        return description
+    prefix = f"{description}\n\n" if description else ""
+    return f"{prefix}Shell environment (best effort):\n{json.dumps(environment, ensure_ascii=False)}"
+
+
 def _translate_tools(tools):
     translated = []
     for tool in tools or []:
@@ -340,8 +359,11 @@ def _translate_tools(tools):
             translated.append(
                 {
                     "name": tool_name,
-                    "description": tool.get("description")
-                    or tool.get("function", {}).get("description", ""),
+                    "description": _builtin_tool_description(
+                        tool_type,
+                        tool.get("description") or tool.get("function", {}).get("description", ""),
+                        tool.get("environment"),
+                    ),
                     "input_schema": _builtin_tool_input_schema(tool_type),
                 }
             )
@@ -490,6 +512,9 @@ def _tool_item_payload(call_id, name, payload, status, response_context=None):
     if item_type == "shell_call":
         payload_obj = _tool_payload_object(payload)
         item["action"] = _normalize_shell_action(payload_obj.get("action"), payload_obj)
+        environment = _normalize_shell_environment(payload_obj.get("environment"))
+        if environment is not None:
+            item["environment"] = environment
         return item
     item["name"] = name
     item["arguments"] = payload
@@ -984,6 +1009,10 @@ def translate_responses_request(body):
                 raise UnsupportedFeatureError("Unsupported Responses API feature: message phase is not supported")
             if phase is not None and role != "assistant":
                 raise UnsupportedFeatureError("Unsupported Responses API feature: message phase is only supported for assistant messages")
+            if phase is not None:
+                raise UnsupportedFeatureError(
+                    "Unsupported Responses API feature: assistant message phase cannot be preserved for MiniMax"
+                )
             if role in {"developer", "system"}:
                 developer_blocks = _translate_content_blocks(item.get("content", []))
                 if any(block.get("type") != "text" for block in developer_blocks):
@@ -995,7 +1024,6 @@ def translate_responses_request(body):
                     system_segments.append(developer_text)
                 continue
             translated_content = _translate_content_blocks(item.get("content", []))
-            translated_content = _assistant_phase_prefix(phase, role) + translated_content
             result["messages"].append({"role": role, "content": translated_content})
             continue
 
@@ -1021,6 +1049,9 @@ def translate_responses_request(body):
                         legacy_action[field_name] = item[field_name]
                 shell_action = _normalize_shell_action(item.get("action"), legacy_action)
                 tool_input = {"action": shell_action} if shell_action else {}
+                shell_environment = _normalize_shell_environment(item.get("environment"))
+                if shell_environment is not None:
+                    tool_input["environment"] = shell_environment
             else:
                 tool_input = _parse_jsonish(item.get("arguments", item.get("input")))
             current_assistant_blocks.append(
@@ -1043,13 +1074,17 @@ def translate_responses_request(body):
             call_id = item.get("call_id", "")
             if not call_id:
                 continue
-            pending_tool_result_blocks.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": call_id,
-                    "content": _translate_tool_result_content(item.get("output", "")),
-                }
-            )
+            tool_result = {
+                "type": "tool_result",
+                "tool_use_id": call_id,
+                "content": _translate_tool_result_content(item.get("output", "")),
+            }
+            output_status = item.get("status")
+            if output_status not in {None, "completed", "failed"}:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: tool call output status is not supported")
+            if output_status == "failed" or item.get("is_error") is True:
+                tool_result["is_error"] = True
+            pending_tool_result_blocks.append(tool_result)
             continue
 
         if item_type == "reasoning":

@@ -129,14 +129,16 @@ Compatibility notes:
 
 - `custom` tools from Codex are accepted and exposed upstream as plain callable tools with an object schema.
 - assistant text outputs are labeled with `phase: "final_answer"`.
-- input assistant message `phase` is preserved best-effort by prepending a synthetic phase text block before the translated assistant content; non-assistant messages with `phase` are rejected.
+- input assistant message `phase` is explicitly rejected instead of being silently rewritten into prompt text; non-assistant messages with `phase` are also rejected.
 - function tools with `strict=false` are rejected instead of being silently weakened.
 - function tools omitted `strict` on input are echoed back with the OpenAI default `strict: true`.
 - developer/system messages are text-only; non-text content is rejected instead of being dropped.
 - `include: ["reasoning.encrypted_content"]` is best-effort only: the proxy emits `encrypted_content` when MiniMax reasoning blocks expose a compatible `data` or `signature` field, and otherwise returns a normal reasoning item without that field.
 - `reasoning.summary` is accepted, but MiniMax does not expose a native summary control; the proxy preserves the field without promising exact summary granularity.
 - built-in `apply_patch` and `shell` calls are modeled with their OpenAI item types on the Responses side, while still being proxied upstream as Anthropic-style tool calls.
+- `shell` tools accept OpenAI-style `environment` config on the Responses side. The proxy forwards `shell_call.environment` structurally and exposes tool-level environment to MiniMax as best-effort descriptive context.
 - `shell_call` is normalized to the OpenAI `action` object shape on the Responses side; legacy flat shell payloads are still accepted on input for compatibility.
 - `input_image.detail` is best-effort only because Anthropic-compatible image inputs do not expose an equivalent detail knob.
-- custom tool grammars with `syntax: "lark"` are explicitly unsupported; only `regex` grammars are mapped structurally today.
+- custom tool grammars with `syntax: "regex"` are mapped structurally; `syntax: "lark"` is accepted best-effort by preserving the grammar in tool description text while keeping unconstrained string input.
+- failed `apply_patch_call_output` and `shell_call_output` items are translated into Anthropic `tool_result` blocks with `is_error: true`.
 - nameless hosted tools from Codex are ignored instead of failing the request, so Codex CLI can continue to operate when it sends local-only tool descriptors the proxy cannot translate upstream.

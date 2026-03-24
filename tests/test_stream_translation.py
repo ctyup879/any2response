@@ -425,6 +425,57 @@ def test_translate_anthropic_tool_use_stream_to_shell_call_events():
     assert output_item["action"] == {"commands": ["pwd"], "timeout_ms": 1000}
 
 
+def test_translate_anthropic_shell_stream_preserves_environment_and_argument_payload():
+    translator = ResponsesEventTranslator(
+        response_context={"tools": [{"type": "shell", "name": "shell"}]},
+    )
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "call_shell",
+                "name": "shell",
+                "input": {
+                    "action": {"commands": ["pwd"], "timeout_ms": 1000},
+                    "environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]},
+                },
+            },
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    args_done = next(event for event in events if event["event"] == "response.function_call_arguments.done")
+    done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["call_id"] == "call_shell"
+    )
+    output_item = next(
+        item
+        for item in next(event for event in events if event["event"] == "response.completed")["data"]["response"]["output"]
+        if item["call_id"] == "call_shell"
+    )
+
+    assert '"environment": {"type": "local", "skills": [{"name": "python", "path": "/tmp/python"}]}' in args_done["data"]["arguments"]
+    assert done["data"]["item"]["environment"] == {
+        "type": "local",
+        "skills": [{"name": "python", "path": "/tmp/python"}],
+    }
+    assert output_item["environment"] == {
+        "type": "local",
+        "skills": [{"name": "python", "path": "/tmp/python"}],
+    }
+
+
 def test_translate_anthropic_tool_use_with_start_input_closes_with_full_arguments():
     translator = ResponsesEventTranslator()
     events = []
