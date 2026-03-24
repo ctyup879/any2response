@@ -354,6 +354,33 @@ def test_translate_anthropic_response_maps_tool_use_to_function_call():
     assert translated["usage"] == {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
 
 
+def test_translate_anthropic_response_maps_custom_tool_use_to_custom_tool_call():
+    body = {
+        "id": "msg_tool",
+        "content": [
+            {"type": "tool_use", "id": "call_patch", "name": "apply_patch", "input": {"path": "README.md"}},
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    translated = translate_anthropic_response(
+        body,
+        "codex-MiniMax-M2.7",
+        response_context={"tools": [{"type": "custom", "name": "apply_patch"}]},
+    )
+
+    assert translated["output"] == [
+        {
+            "id": "fc_call_patch",
+            "type": "custom_tool_call",
+            "call_id": "call_patch",
+            "name": "apply_patch",
+            "input": '{"path": "README.md"}',
+            "status": "completed",
+        }
+    ]
+
+
 def test_translate_anthropic_response_includes_request_context_fields():
     body = {
         "id": "msg_ctx",
@@ -413,6 +440,28 @@ def test_translate_responses_request_accepts_reasoning_encrypted_content_include
     assert translated["messages"] == [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
 
 
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("conversation", "conv_123"),
+        ("context_management", {"type": "auto"}),
+        ("prompt", {"id": "pmpt_123"}),
+        ("prompt_cache_retention", {"strategy": "session"}),
+        ("safety_identifier", "safety-user"),
+        ("service_tier", "auto"),
+    ],
+)
+def test_translate_responses_request_rejects_unsupported_official_fields(field_name, field_value):
+    body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": "hello",
+        field_name: field_value,
+    }
+
+    with pytest.raises(UnsupportedFeatureError, match=field_name):
+        translate_responses_request(body)
+
+
 def test_translate_responses_request_rejects_unknown_include_values():
     with pytest.raises(UnsupportedFeatureError, match="include"):
         translate_responses_request(
@@ -424,7 +473,7 @@ def test_translate_responses_request_rejects_unknown_include_values():
         )
 
 
-def test_translate_anthropic_response_limits_tool_calls_when_parallel_disabled():
+def test_translate_anthropic_response_rejects_multiple_tool_calls_when_parallel_disabled():
     body = {
         "id": "msg_multi_tool",
         "content": [
@@ -434,22 +483,12 @@ def test_translate_anthropic_response_limits_tool_calls_when_parallel_disabled()
         "usage": {"input_tokens": 10, "output_tokens": 5},
     }
 
-    translated = translate_anthropic_response(
-        body,
-        "codex-MiniMax-M2.7",
-        response_context={"parallel_tool_calls": False},
-    )
-
-    assert translated["output"] == [
-        {
-            "id": "fc_call_1",
-            "type": "function_call",
-            "call_id": "call_1",
-            "name": "tool_a",
-            "arguments": '{"x": 1}',
-            "status": "completed",
-        }
-    ]
+    with pytest.raises(UnsupportedFeatureError, match="parallel_tool_calls"):
+        translate_anthropic_response(
+            body,
+            "codex-MiniMax-M2.7",
+            response_context={"parallel_tool_calls": False},
+        )
 
 
 def test_translate_responses_request_accepts_string_input():

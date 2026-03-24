@@ -43,6 +43,27 @@ class FakeUpstreamClient:
             yield item
 
 
+class MultiToolStreamClient(FakeUpstreamClient):
+    async def stream_messages(self, payload):
+        self.last_payload = payload
+        for item in [
+            {"type": "message_start", "message": {"id": "msg_stream"}},
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": "call_1", "name": "tool_a", "input": {"x": 1}},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": "call_2", "name": "tool_b", "input": {"y": 2}},
+            },
+            {"type": "content_block_stop", "index": 1},
+        ]:
+            yield item
+
+
 def test_post_responses_requires_auth():
     app = create_app(
         {
@@ -171,3 +192,36 @@ def test_post_responses_forwards_replayed_tool_turns_to_upstream():
     assert upstream.last_payload is not None
     assert upstream.last_payload["messages"][-2]["content"][0]["type"] == "tool_use"
     assert upstream.last_payload["messages"][-1]["content"][0]["type"] == "tool_result"
+
+
+def test_post_responses_stream_emits_error_for_parallel_tool_call_violation():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=MultiToolStreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": True,
+            "parallel_tool_calls": False,
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "hello"}],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert "event: error" in response.text
+    assert "parallel_tool_calls" in response.text
+    assert "data: [DONE]" in response.text

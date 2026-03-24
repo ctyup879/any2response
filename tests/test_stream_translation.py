@@ -1,4 +1,6 @@
-from app.translator import ResponsesEventTranslator
+import pytest
+
+from app.translator import ResponsesEventTranslator, UnsupportedFeatureError
 
 
 def test_translate_anthropic_sse_to_responses_events():
@@ -213,6 +215,50 @@ def test_translate_anthropic_tool_use_stream_to_function_call_events():
     assert item_done["data"]["item"]["arguments"] == '{"city":"Shanghai"}'
 
 
+def test_translate_anthropic_tool_use_stream_to_custom_tool_call_events():
+    translator = ResponsesEventTranslator(
+        response_context={"tools": [{"type": "custom", "name": "apply_patch"}]},
+    )
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "tool_use",
+                "id": "call_patch",
+                "name": "apply_patch",
+                "input": {"path": "README.md"},
+            },
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    added = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.added" and event["data"]["item"]["call_id"] == "call_patch"
+    )
+    done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["call_id"] == "call_patch"
+    )
+    completed = next(event for event in events if event["event"] == "response.completed")
+    output_item = next(item for item in completed["data"]["response"]["output"] if item["call_id"] == "call_patch")
+
+    assert added["data"]["item"]["type"] == "custom_tool_call"
+    assert done["data"]["item"]["type"] == "custom_tool_call"
+    assert output_item["type"] == "custom_tool_call"
+    assert output_item["input"] == '{"path": "README.md"}'
+
+
 def test_translate_anthropic_tool_use_with_start_input_closes_with_full_arguments():
     translator = ResponsesEventTranslator()
     events = []
@@ -243,45 +289,24 @@ def test_translate_anthropic_tool_use_with_start_input_closes_with_full_argument
     assert args_done["data"]["arguments"] == '{"city": "Shanghai"}'
 
 
-def test_translate_anthropic_stream_limits_tool_calls_when_parallel_disabled():
+def test_translate_anthropic_stream_rejects_multiple_tool_calls_when_parallel_disabled():
     translator = ResponsesEventTranslator(
         response_context={"parallel_tool_calls": False},
     )
-    events = []
-
-    anthropic_events = [
-        {"type": "message_start", "message": {"id": "msg_123"}},
+    translator.feed({"type": "message_start", "message": {"id": "msg_123"}})
+    translator.feed(
         {
             "type": "content_block_start",
             "index": 0,
             "content_block": {"type": "tool_use", "id": "call_1", "name": "tool_a", "input": {"x": 1}},
-        },
-        {"type": "content_block_stop", "index": 0},
-        {
-            "type": "content_block_start",
-            "index": 1,
-            "content_block": {"type": "tool_use", "id": "call_2", "name": "tool_b", "input": {"y": 2}},
-        },
-        {"type": "content_block_stop", "index": 1},
-        {"type": "message_stop"},
-    ]
+        }
+    )
 
-    for item in anthropic_events:
-        events.extend(translator.feed(item))
-
-    added_calls = [
-        event["data"]["item"]["call_id"]
-        for event in events
-        if event["event"] == "response.output_item.added" and event["data"]["item"]["type"] == "function_call"
-    ]
-    done_calls = [
-        event["data"]["item"]["call_id"]
-        for event in events
-        if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "function_call"
-    ]
-    completed = next(event for event in events if event["event"] == "response.completed")
-    output_calls = [item["call_id"] for item in completed["data"]["response"]["output"] if item["type"] == "function_call"]
-
-    assert added_calls == ["call_1"]
-    assert done_calls == ["call_1"]
-    assert output_calls == ["call_1"]
+    with pytest.raises(UnsupportedFeatureError, match="parallel_tool_calls"):
+        translator.feed(
+            {
+                "type": "content_block_start",
+                "index": 1,
+                "content_block": {"type": "tool_use", "id": "call_2", "name": "tool_b", "input": {"y": 2}},
+            }
+        )

@@ -69,6 +69,7 @@ Currently supported on `/v1/responses`:
 - Function call / function call output turn translation
 - Embedded `tool_use` / `tool_result` content blocks inside messages
 - `custom_tool_call` / `custom_tool_call_output` input items mapped onto Anthropic tool turns
+- Responses output typing for both `function_call` and `custom_tool_call`
 - Text/image/PDF user content blocks:
   - `input_text`
   - `input_image` with `data:` URL or `http(s)` URL
@@ -81,7 +82,7 @@ Currently supported on `/v1/responses`:
   - `text.format` and legacy `response_format` for JSON-mode instruction injection
   - `prompt_cache_key` retained in proxy response context
   - `include: ["reasoning.encrypted_content"]` accepted as a no-op compatibility flag
-  - `parallel_tool_calls: false` enforced proxy-side by exposing only the first tool call from an upstream turn
+  - `parallel_tool_calls: false` enforced proxy-side by rejecting upstream turns that contain multiple tool calls
 - Streaming translation for:
   - text deltas
   - reasoning/thinking deltas
@@ -94,6 +95,12 @@ Explicitly unsupported today:
 - `background`
 - `previous_response_id`
 - `item_reference`
+- `conversation`
+- `context_management`
+- `prompt`
+- `prompt_cache_retention`
+- `safety_identifier`
+- `service_tier`
 - `input_file.file_id`
 - remote text-file fetching and most non-text/non-image/non-PDF file media types
 - named OpenAI hosted tool types beyond plain function tools, such as `file_search`, `web_search`, and `code_interpreter`
@@ -103,4 +110,5 @@ Explicitly unsupported today:
 Compatibility notes:
 
 - `custom` tools from Codex are accepted and exposed upstream as plain callable tools with an object schema.
+- `include: ["reasoning.encrypted_content"]` is still accepted because `codex` sends it today, but MiniMax does not expose an upstream equivalent that this proxy can map into OpenAI-style `encrypted_content`.
 - nameless hosted tools from Codex are ignored instead of failing the request, so Codex CLI can continue to operate when it sends local-only tool descriptors the proxy cannot translate upstream.

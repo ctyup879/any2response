@@ -65,13 +65,15 @@ def create_app(settings_override=None, upstream_client=None):
                 upstream_body = await client.create_message(translated)
             except UpstreamHTTPError as exc:
                 return _error_response(exc.status_code, str(exc.message), "upstream_error")
-            return JSONResponse(
-                translate_anthropic_response(
+            try:
+                translated_response = translate_anthropic_response(
                     upstream_body,
                     translated.get("model"),
                     response_context=response_context,
                 )
-            )
+            except UnsupportedFeatureError as exc:
+                return _error_response(400, str(exc), "unsupported_feature")
+            return JSONResponse(translated_response)
 
         async def event_stream():
             translator = ResponsesEventTranslator(
@@ -89,6 +91,12 @@ def create_app(settings_override=None, upstream_client=None):
                 yield format_sse(
                     "error",
                     {"error": {"message": str(exc.message), "type": "upstream_error"}},
+                )
+                yield "data: [DONE]\n\n"
+            except UnsupportedFeatureError as exc:
+                yield format_sse(
+                    "error",
+                    {"error": {"message": str(exc), "type": "unsupported_feature"}},
                 )
                 yield "data: [DONE]\n\n"
 

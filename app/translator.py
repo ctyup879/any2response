@@ -10,6 +10,16 @@ class UnsupportedFeatureError(ValueError):
     pass
 
 
+UNSUPPORTED_REQUEST_FIELDS = {
+    "conversation",
+    "context_management",
+    "prompt",
+    "prompt_cache_retention",
+    "safety_identifier",
+    "service_tier",
+}
+
+
 def _stringify(value):
     if isinstance(value, str):
         return value
@@ -236,6 +246,48 @@ def _normalize_include(include):
     return normalized
 
 
+def _validate_supported_request_fields(body):
+    for field_name in UNSUPPORTED_REQUEST_FIELDS:
+        if body.get(field_name) is not None:
+            raise UnsupportedFeatureError(
+                f"Unsupported Responses API feature: {field_name} is not supported"
+            )
+
+
+def _tool_type_lookup(response_context):
+    lookup = {}
+    if not isinstance(response_context, dict):
+        return lookup
+    for tool in response_context.get("tools", []):
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name") or tool.get("function", {}).get("name", "")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        tool_type = tool.get("type")
+        if tool_type == "custom":
+            lookup[name.strip()] = "custom_tool_call"
+        else:
+            lookup.setdefault(name.strip(), "function_call")
+    return lookup
+
+
+def _tool_item_payload(call_id, name, payload, status, response_context=None):
+    item_type = _tool_type_lookup(response_context).get(name, "function_call")
+    item = {
+        "id": f"fc_{call_id}",
+        "type": item_type,
+        "call_id": call_id,
+        "name": name,
+        "status": status,
+    }
+    if item_type == "custom_tool_call":
+        item["input"] = payload
+    else:
+        item["arguments"] = payload
+    return item
+
+
 def build_response_context(body, model=None):
     text_config = body.get("text")
     if not isinstance(text_config, dict):
@@ -398,6 +450,7 @@ def _iter_input_items(raw_input):
 
 
 def translate_responses_request(body):
+    _validate_supported_request_fields(body)
     if body.get("background"):
         raise UnsupportedFeatureError("background mode is not supported")
     if body.get("previous_response_id"):
@@ -597,17 +650,18 @@ def translate_anthropic_response(body, model, response_context=None):
             )
         elif block_type == "tool_use":
             if not parallel_tool_calls and tool_call_seen:
-                continue
+                raise UnsupportedFeatureError(
+                    "Unsupported Responses API behavior: parallel_tool_calls=false cannot accept multiple tool calls"
+                )
             tool_call_seen = True
             output.append(
-                {
-                    "id": f"fc_{block.get('id', uuid.uuid4().hex[:8])}",
-                    "type": "function_call",
-                    "call_id": block.get("id", ""),
-                    "name": block.get("name", ""),
-                    "arguments": json.dumps(block.get("input", {}), ensure_ascii=False),
-                    "status": "completed",
-                }
+                _tool_item_payload(
+                    block.get("id", ""),
+                    block.get("name", ""),
+                    json.dumps(block.get("input", {}), ensure_ascii=False),
+                    "completed",
+                    response_context=response_context,
+                )
             )
 
     usage = body.get("usage", {})
@@ -712,14 +766,13 @@ class ResponsesEventTranslator:
             call_id = call["call_id"]
             args = self.tool_args.get(index, "") or self.tool_seed_args.get(index, "{}")
             items.append(
-                {
-                    "id": self._tool_item_id(call_id),
-                    "type": "function_call",
-                    "call_id": call_id,
-                    "name": call["name"],
-                    "arguments": args,
-                    "status": "completed" if index in self.tool_done else "in_progress",
-                }
+                _tool_item_payload(
+                    call_id,
+                    call["name"],
+                    args,
+                    "completed" if index in self.tool_done else "in_progress",
+                    response_context=self.response_context,
+                )
             )
         return items
 
@@ -976,16 +1029,15 @@ class ResponsesEventTranslator:
                 {
                     "type": "response.output_item.done",
                     "output_index": index,
-                        "item": {
-                            "id": self._tool_item_id(call_id),
-                            "type": "function_call",
-                            "call_id": call_id,
-                            "name": call["name"],
-                            "arguments": args,
-                            "status": "completed",
-                        },
-                    },
-                ),
+                    "item": _tool_item_payload(
+                        call_id,
+                        call["name"],
+                        args,
+                        "completed",
+                        response_context=self.response_context,
+                    ),
+                },
+            ),
         ]
 
     def _emit_completed(self):
@@ -1028,8 +1080,9 @@ class ResponsesEventTranslator:
                 events.extend(self._ensure_reasoning_started(index))
             elif block.get("type") == "tool_use":
                 if not self.response_context.get("parallel_tool_calls", True) and self.tool_calls:
-                    self.ignored_tool_indexes.add(index)
-                    return events
+                    raise UnsupportedFeatureError(
+                        "Unsupported Responses API behavior: parallel_tool_calls=false cannot accept multiple tool calls"
+                    )
                 call_id = block.get("id", f"call_{uuid.uuid4().hex[:8]}")
                 name = block.get("name", "")
                 self.tool_calls[index] = {"call_id": call_id, "name": name}
@@ -1041,14 +1094,13 @@ class ResponsesEventTranslator:
                         {
                             "type": "response.output_item.added",
                             "output_index": index,
-                            "item": {
-                                "id": self._tool_item_id(call_id),
-                                "type": "function_call",
-                                "call_id": call_id,
-                                "name": name,
-                                "arguments": "",
-                                "status": "in_progress",
-                            },
+                            "item": _tool_item_payload(
+                                call_id,
+                                name,
+                                "",
+                                "in_progress",
+                                response_context=self.response_context,
+                            ),
                         },
                     )
                 )
