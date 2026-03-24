@@ -83,6 +83,9 @@ def _decode_data_url_text(parsed):
 
 
 def _translate_image_block(item):
+    detail = item.get("detail")
+    if detail not in (None, "auto"):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: input_image.detail is not supported")
     image_url = item.get("image_url", "")
     if isinstance(image_url, dict):
         image_url = image_url.get("url", "")
@@ -225,6 +228,27 @@ def _translate_tools(tools):
             raise UnsupportedFeatureError(
                 "Unsupported Responses API feature: function tool strict=false is not supported"
             )
+        if tool_type == "custom":
+            format_spec = tool.get("format") or {"type": "text"}
+            if not isinstance(format_spec, dict):
+                raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
+            format_type = format_spec.get("type", "text")
+            if format_type != "text":
+                raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
+            translated.append(
+                {
+                    "name": tool_name,
+                    "description": tool.get("description")
+                    or tool.get("function", {}).get("description", ""),
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"input": {"type": "string"}},
+                        "required": ["input"],
+                        "additionalProperties": False,
+                    },
+                }
+            )
+            continue
         translated.append(
             {
                 "name": tool_name,
@@ -304,7 +328,7 @@ def _tool_item_payload(call_id, name, payload, status, response_context=None):
         "status": status,
     }
     if item_type == "custom_tool_call":
-        item["input"] = payload
+        item["input"] = _unwrap_custom_tool_payload(payload)
     else:
         item["arguments"] = payload
     return item
@@ -351,6 +375,50 @@ def _reasoning_item_payload(item_id, text, encrypted_content=None):
     return item
 
 
+def _normalize_response_tools(tools):
+    normalized = []
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            normalized.append(tool)
+            continue
+        normalized_tool = dict(tool)
+        tool_type = normalized_tool.get("type")
+        if tool_type in {None, "function"} and "strict" not in normalized_tool:
+            normalized_tool["strict"] = True
+        normalized.append(normalized_tool)
+    return normalized
+
+
+def _custom_tool_input_value(value):
+    if isinstance(value, dict) and set(value) == {"input"} and isinstance(value.get("input"), str):
+        return value["input"]
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return _stringify(value)
+
+
+def _custom_tool_payload(value):
+    return {"input": _custom_tool_input_value(value)}
+
+
+def _unwrap_custom_tool_payload(payload):
+    if isinstance(payload, dict):
+        if set(payload) == {"input"} and isinstance(payload.get("input"), str):
+            return payload["input"]
+        return _stringify(payload)
+    if isinstance(payload, str):
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            return payload
+        if isinstance(parsed, dict) and set(parsed) == {"input"} and isinstance(parsed.get("input"), str):
+            return parsed["input"]
+        return payload
+    return _stringify(payload)
+
+
 def _tool_stream_event_spec(call, response_context=None):
     item_type = _tool_type_lookup(response_context).get(call.get("name", ""), "function_call")
     if item_type == "custom_tool_call":
@@ -387,7 +455,7 @@ def build_response_context(body, model=None):
         "user": body.get("user"),
         "store": body.get("store", False),
         "tool_choice": body.get("tool_choice", "auto"),
-        "tools": body.get("tools", []),
+        "tools": _normalize_response_tools(body.get("tools", [])),
         "text": text_config,
         "temperature": body.get("temperature", 1.0),
         "top_p": body.get("top_p", 1.0),
@@ -631,8 +699,6 @@ def translate_responses_request(body):
     tools = _translate_tools(body.get("tools", []))
     if allowed_tool_names is not None:
         tools = [tool for tool in tools if tool.get("name") in allowed_tool_names]
-    if tools:
-        result["tools"] = tools
 
     tool_choice_input = body.get("tool_choice")
     if isinstance(tool_choice_input, dict) and tool_choice_input.get("type") == "allowed_tools":
@@ -647,6 +713,27 @@ def translate_responses_request(body):
             )
 
     tool_choice = _translate_tool_choice(tool_choice_input)
+    if (
+        isinstance(tool_choice_input, dict)
+        and tool_choice_input.get("type") in {"custom", "apply_patch", "shell"}
+        and tool_choice
+        and tool_choice.get("type") == "tool"
+        and all(tool.get("name") != tool_choice["name"] for tool in tools)
+    ):
+        tools.append(
+            {
+                "name": tool_choice["name"],
+                "description": "",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"input": {"type": "string"}},
+                    "required": ["input"],
+                    "additionalProperties": False,
+                },
+            }
+        )
+    if tools:
+        result["tools"] = tools
     if tool_choice:
         result["tool_choice"] = tool_choice
 
@@ -672,6 +759,10 @@ def translate_responses_request(body):
             flush_assistant()
             flush_tool_results()
             role = item.get("role", "user")
+            if role not in {"user", "assistant", "developer", "system"}:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: message role is not supported")
+            if item.get("phase") is not None:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: message phase is not supported")
             if role in {"developer", "system"}:
                 developer_blocks = _translate_content_blocks(item.get("content", []))
                 if any(block.get("type") != "text" for block in developer_blocks):
@@ -700,7 +791,11 @@ def translate_responses_request(body):
                     "type": "tool_use",
                     "id": item.get("call_id", f"call_{uuid.uuid4().hex[:8]}"),
                     "name": name,
-                    "input": _parse_jsonish(item.get("arguments", item.get("input"))),
+                    "input": (
+                        _custom_tool_payload(item.get("input"))
+                        if item_type == "custom_tool_call"
+                        else _parse_jsonish(item.get("arguments", item.get("input")))
+                    ),
                 }
             )
             continue
@@ -789,6 +884,7 @@ def translate_anthropic_response(body, model, response_context=None):
                     "id": f"msg_{response_id}_{index}",
                     "type": "message",
                     "role": "assistant",
+                    "phase": "final_answer",
                     "status": "completed",
                     "content": [
                         {
@@ -824,6 +920,7 @@ def translate_anthropic_response(body, model, response_context=None):
         "status": "completed",
         "model": model,
         "error": None,
+        "incomplete_details": None,
         "output": output,
         "output_text": "".join(output_text_parts),
         "usage": _usage_payload(body.get("usage", {})),
@@ -900,6 +997,7 @@ class ResponsesEventTranslator:
                     "id": self._message_id(assistant_index),
                     "type": "message",
                     "role": "assistant",
+                    "phase": "final_answer",
                     "status": "completed" if assistant_index in self.message_done else "in_progress",
                     "content": [
                         {
@@ -934,6 +1032,7 @@ class ResponsesEventTranslator:
             "status": status,
             "background": self.response_context.get("background", False),
             "error": None,
+            "incomplete_details": None,
             "model": self.model,
             "output": self._build_output_items() if include_output else [],
             "metadata": self.response_context.get("metadata", {}),
@@ -1009,6 +1108,7 @@ class ResponsesEventTranslator:
                             "id": msg_id,
                             "type": "message",
                             "role": "assistant",
+                            "phase": "final_answer",
                             "status": "in_progress",
                             "content": [],
                         },
@@ -1065,12 +1165,13 @@ class ResponsesEventTranslator:
                 {
                     "type": "response.output_item.done",
                     "output_index": index,
-                    "item": {
-                        "id": msg_id,
-                        "type": "message",
-                        "role": "assistant",
-                        "status": "completed",
-                        "content": [
+                        "item": {
+                            "id": msg_id,
+                            "type": "message",
+                            "role": "assistant",
+                            "phase": "final_answer",
+                            "status": "completed",
+                            "content": [
                             {
                                 "type": "output_text",
                                 "text": text,
@@ -1161,6 +1262,7 @@ class ResponsesEventTranslator:
         call_id = call["call_id"]
         args = self.tool_args.get(index, "") or self.tool_seed_args.get(index, "{}")
         event_spec = _tool_stream_event_spec(call, response_context=self.response_context)
+        final_value = _unwrap_custom_tool_payload(args) if event_spec["field_name"] == "input" else args
         return [
             self._emit(
                 event_spec["done_event"],
@@ -1168,7 +1270,7 @@ class ResponsesEventTranslator:
                     "type": event_spec["done_event"],
                     "item_id": self._tool_item_id(call_id),
                     "output_index": index,
-                    event_spec["field_name"]: args,
+                    event_spec["field_name"]: final_value,
                 },
             ),
             self._emit(

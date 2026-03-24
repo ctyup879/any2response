@@ -44,6 +44,12 @@ def test_translate_anthropic_sse_to_responses_events():
     delta_event = next(event for event in events if event["event"] == "response.output_text.delta")
     assert delta_event["data"]["delta"] == "Hello"
     assert "obfuscation" in delta_event["data"]
+    message_done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "message"
+    )
+    assert message_done["data"]["item"]["phase"] == "final_answer"
 
     completed_event = events[-1]
     assert completed_event["data"]["response"]["status"] == "completed"
@@ -86,6 +92,7 @@ def test_translate_anthropic_sse_includes_request_context_fields():
     assert created["data"]["response"]["max_output_tokens"] == 128
     assert created["data"]["response"]["include"] == ["reasoning.encrypted_content"]
     assert created["data"]["response"]["prompt_cache_key"] == "cache-key-123"
+    assert created["data"]["response"]["incomplete_details"] is None
     assert in_progress["data"]["response"]["metadata"] == {"request_id": "abc"}
 
 
@@ -293,7 +300,7 @@ def test_translate_anthropic_tool_use_stream_to_custom_tool_call_events():
                 "type": "tool_use",
                 "id": "call_patch",
                 "name": "apply_patch",
-                "input": {"path": "README.md"},
+                "input": {"input": "*** Begin Patch\n*** End Patch\n"},
             },
         },
         {"type": "content_block_stop", "index": 1},
@@ -318,10 +325,10 @@ def test_translate_anthropic_tool_use_stream_to_custom_tool_call_events():
     output_item = next(item for item in completed["data"]["response"]["output"] if item["call_id"] == "call_patch")
 
     assert added["data"]["item"]["type"] == "custom_tool_call"
-    assert input_done["data"]["input"] == '{"path": "README.md"}'
+    assert input_done["data"]["input"] == "*** Begin Patch\n*** End Patch\n"
     assert done["data"]["item"]["type"] == "custom_tool_call"
     assert output_item["type"] == "custom_tool_call"
-    assert output_item["input"] == '{"path": "README.md"}'
+    assert output_item["input"] == "*** Begin Patch\n*** End Patch\n"
 
 
 def test_translate_anthropic_tool_use_with_start_input_closes_with_full_arguments():

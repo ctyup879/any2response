@@ -67,9 +67,11 @@ Currently supported on `/v1/responses`:
 - Function tools, `tool_choice` (`auto`, `none`, `required`, named function)
 - `tool_choice.allowed_tools` via proxy-side tool filtering
 - `tool_choice` best-effort support for named `custom`, `apply_patch`, and `shell` selections
+- built-in `apply_patch` / `shell` selection synthesized into proxy-side tool definitions when needed
 - Function call / function call output turn translation
 - Embedded `tool_use` / `tool_result` content blocks inside messages
 - `custom_tool_call` / `custom_tool_call_output` input items mapped onto Anthropic tool turns
+- custom tools exposed upstream through a string-input wrapper object so text inputs remain usable
 - Responses output typing for both `function_call` and `custom_tool_call`
 - Text/image/PDF user content blocks:
   - `input_text`
@@ -102,6 +104,7 @@ Explicitly unsupported today:
 - `previous_response_id`
 - `truncation` values other than `disabled`
 - `max_tool_calls`
+- input message `phase`
 - `item_reference`
 - `reasoning.summary`
 - reasoning input replay items
@@ -113,6 +116,7 @@ Explicitly unsupported today:
 - `service_tier`
 - `input_file.file_id`
 - remote text-file fetching and most non-text/non-image/non-PDF file media types
+- `input_image.detail` values other than `auto`
 - named OpenAI hosted or remote tool types beyond plain function/custom tools, such as `file_search`, `web_search`, `computer_use`, `code_interpreter`, and `mcp`
 - full OpenAI reasoning item replay semantics
 - annotations/logprobs/citations style response extras
@@ -120,7 +124,9 @@ Explicitly unsupported today:
 Compatibility notes:
 
 - `custom` tools from Codex are accepted and exposed upstream as plain callable tools with an object schema.
+- assistant text outputs are labeled with `phase: "final_answer"`; input message `phase` is rejected instead of being dropped.
 - function tools with `strict=false` are rejected instead of being silently weakened.
+- function tools omitted `strict` on input are echoed back with the OpenAI default `strict: true`.
 - developer/system messages are text-only; non-text content is rejected instead of being dropped.
 - `include: ["reasoning.encrypted_content"]` is best-effort only: the proxy emits `encrypted_content` when MiniMax reasoning blocks expose a compatible `data` or `signature` field, and otherwise returns a normal reasoning item without that field.
 - nameless hosted tools from Codex are ignored instead of failing the request, so Codex CLI can continue to operate when it sends local-only tool descriptors the proxy cannot translate upstream.
