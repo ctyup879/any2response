@@ -408,6 +408,7 @@ def test_translate_anthropic_response_includes_reasoning_encrypted_content_when_
             "id": "rs_resp_msg_reasoning_0",
             "type": "reasoning",
             "summary": [{"type": "summary_text", "text": "Plan"}],
+            "content": [{"type": "reasoning_text", "text": "Plan"}],
             "encrypted_content": "enc_sig_123",
         }
     ]
@@ -823,6 +824,7 @@ def test_translate_anthropic_response_maps_thinking_to_reasoning_output():
         "id": "rs_resp_msg_reasoning_0",
         "type": "reasoning",
         "summary": [{"type": "summary_text", "text": "Need to inspect weather first"}],
+        "content": [{"type": "reasoning_text", "text": "Need to inspect weather first"}],
     }
     assert translated["output"][1]["type"] == "message"
 
@@ -862,6 +864,70 @@ def test_translate_responses_request_supports_direct_tool_choice_shape():
     assert translated["tool_choice"] == {"type": "tool", "name": "lookup_weather"}
 
 
+def test_translate_responses_request_supports_custom_tool_choice_shape():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "tool_choice": {"type": "custom", "name": "apply_patch"},
+        }
+    )
+
+    assert translated["tool_choice"] == {"type": "tool", "name": "apply_patch"}
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        {"type": "mcp", "server_label": "deepwiki", "name": "search"},
+        {"type": "file_search"},
+        {"type": "web_search_preview"},
+        {"type": "computer_use_preview"},
+        {"type": "code_interpreter"},
+        {"type": "image_generation"},
+    ],
+)
+def test_translate_responses_request_rejects_unsupported_tool_choice_type(tool_choice):
+    with pytest.raises(UnsupportedFeatureError, match="tool_choice"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "tool_choice": tool_choice,
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "expected_name"),
+    [
+        ({"type": "apply_patch"}, "apply_patch"),
+        ({"type": "shell"}, "shell"),
+    ],
+)
+def test_translate_responses_request_supports_builtin_named_tool_choice(tool_choice, expected_name):
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "tool_choice": tool_choice,
+        }
+    )
+
+    assert translated["tool_choice"] == {"type": "tool", "name": expected_name}
+
+
+def test_translate_responses_request_rejects_unknown_tool_choice_string():
+    with pytest.raises(UnsupportedFeatureError, match="tool_choice"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "tool_choice": "banana",
+            }
+        )
+
+
 def test_translate_responses_request_maps_reasoning_effort_to_thinking():
     translated = translate_responses_request(
         {
@@ -875,6 +941,19 @@ def test_translate_responses_request_maps_reasoning_effort_to_thinking():
     assert translated["thinking"] == {"type": "enabled", "budget_tokens": 3200}
 
 
+def test_translate_responses_request_maps_reasoning_xhigh_to_thinking():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "max_output_tokens": 4000,
+            "reasoning": {"effort": "xhigh"},
+        }
+    )
+
+    assert translated["thinking"] == {"type": "enabled", "budget_tokens": 3800}
+
+
 def test_translate_responses_request_omits_thinking_for_reasoning_none():
     translated = translate_responses_request(
         {
@@ -885,3 +964,145 @@ def test_translate_responses_request_omits_thinking_for_reasoning_none():
     )
 
     assert "thinking" not in translated
+
+
+def test_translate_responses_request_rejects_reasoning_summary_control():
+    with pytest.raises(UnsupportedFeatureError, match="reasoning.summary"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "reasoning": {"summary": "concise"},
+            }
+        )
+
+
+def test_translate_responses_request_rejects_invalid_reasoning_effort():
+    with pytest.raises(UnsupportedFeatureError, match="reasoning.effort"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "reasoning": {"effort": "ultra"},
+            }
+        )
+
+
+def test_translate_responses_request_rejects_reasoning_input_items():
+    with pytest.raises(UnsupportedFeatureError, match="reasoning input items"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "Plan"}]}],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_non_text_developer_content():
+    with pytest.raises(UnsupportedFeatureError, match="developer"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "developer",
+                        "content": [{"type": "input_image", "image_url": "https://example.com/cat.png"}],
+                    }
+                ],
+            }
+        )
+
+
+def test_translate_responses_request_applies_text_verbosity_instruction():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "text": {"format": {"type": "text"}, "verbosity": "low"},
+        }
+    )
+
+    assert "Keep the response concise." in translated["system"]
+
+
+def test_translate_responses_request_rejects_invalid_text_verbosity():
+    with pytest.raises(UnsupportedFeatureError, match="text.verbosity"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "text": {"format": {"type": "text"}, "verbosity": "ultra"},
+            }
+        )
+
+
+def test_translate_responses_request_rejects_unknown_text_format_type():
+    with pytest.raises(UnsupportedFeatureError, match="text.format"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "text": {"format": {"type": "xml"}},
+            }
+        )
+
+
+def test_translate_responses_request_respects_non_strict_json_schema_format():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "text": {
+                "format": {
+                    "type": "json_schema",
+                    "strict": False,
+                    "schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+                }
+            },
+        }
+    )
+
+    assert "strictly follows this JSON schema" not in translated["system"]
+    assert "matches this JSON schema as closely as possible" in translated["system"]
+
+
+def test_translate_responses_request_rejects_function_tool_strict_false():
+    with pytest.raises(UnsupportedFeatureError, match="strict"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "lookup_weather",
+                        "strict": False,
+                        "parameters": {"type": "object"},
+                    }
+                ],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_unknown_stream_options():
+    with pytest.raises(UnsupportedFeatureError, match="stream_options"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "stream_options": {"bogus": True},
+            }
+        )
+
+
+def test_translate_responses_request_rejects_stream_options_when_stream_disabled():
+    with pytest.raises(UnsupportedFeatureError, match="stream_options"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "stream": False,
+                "stream_options": {"include_obfuscation": False},
+            }
+        )

@@ -66,6 +66,7 @@ Currently supported on `/v1/responses`:
 - Developer/system instructions folded into Anthropic `system`
 - Function tools, `tool_choice` (`auto`, `none`, `required`, named function)
 - `tool_choice.allowed_tools` via proxy-side tool filtering
+- `tool_choice` best-effort support for named `custom`, `apply_patch`, and `shell` selections
 - Function call / function call output turn translation
 - Embedded `tool_use` / `tool_result` content blocks inside messages
 - `custom_tool_call` / `custom_tool_call_output` input items mapped onto Anthropic tool turns
@@ -80,9 +81,13 @@ Currently supported on `/v1/responses`:
   - `top_p`
   - `stop`
   - `text.format` and legacy `response_format` for JSON-mode instruction injection
+  - best-effort `text.verbosity` via injected system guidance
   - `prompt_cache_key` retained in proxy response context
   - best-effort `include: ["reasoning.encrypted_content"]` when the upstream reasoning block exposes a compatible field
   - `parallel_tool_calls: false` enforced proxy-side by rejecting upstream turns that contain multiple tool calls
+  - `stream_options.include_obfuscation` on streaming delta events
+- Reasoning controls:
+  - `reasoning.effort` including `xhigh` mapped approximately onto Anthropic thinking budgets
 - Streaming translation for:
   - text deltas
   - reasoning/thinking deltas
@@ -98,6 +103,8 @@ Explicitly unsupported today:
 - `truncation` values other than `disabled`
 - `max_tool_calls`
 - `item_reference`
+- `reasoning.summary`
+- reasoning input replay items
 - `conversation`
 - `context_management`
 - `prompt`
@@ -106,12 +113,14 @@ Explicitly unsupported today:
 - `service_tier`
 - `input_file.file_id`
 - remote text-file fetching and most non-text/non-image/non-PDF file media types
-- named OpenAI hosted tool types beyond plain function tools, such as `file_search`, `web_search`, and `code_interpreter`
+- named OpenAI hosted or remote tool types beyond plain function/custom tools, such as `file_search`, `web_search`, `computer_use`, `code_interpreter`, and `mcp`
 - full OpenAI reasoning item replay semantics
 - annotations/logprobs/citations style response extras
 
 Compatibility notes:
 
 - `custom` tools from Codex are accepted and exposed upstream as plain callable tools with an object schema.
+- function tools with `strict=false` are rejected instead of being silently weakened.
+- developer/system messages are text-only; non-text content is rejected instead of being dropped.
 - `include: ["reasoning.encrypted_content"]` is best-effort only: the proxy emits `encrypted_content` when MiniMax reasoning blocks expose a compatible `data` or `signature` field, and otherwise returns a normal reasoning item without that field.
 - nameless hosted tools from Codex are ignored instead of failing the request, so Codex CLI can continue to operate when it sends local-only tool descriptors the proxy cannot translate upstream.

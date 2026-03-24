@@ -1,6 +1,7 @@
 import base64
 import json
 import mimetypes
+import secrets
 import time
 import urllib.parse
 import uuid
@@ -219,6 +220,11 @@ def _translate_tools(tools):
             raise UnsupportedFeatureError(
                 f"Unsupported Responses API tool type: {tool_type}"
             )
+        strict = tool.get("strict", tool.get("function", {}).get("strict"))
+        if tool_type in {None, "function"} and strict is False:
+            raise UnsupportedFeatureError(
+                "Unsupported Responses API feature: function tool strict=false is not supported"
+            )
         translated.append(
             {
                 "name": tool_name,
@@ -244,6 +250,22 @@ def _normalize_include(include):
             raise UnsupportedFeatureError(f"Unsupported Responses API include value: {value}")
         normalized.append(value)
     return normalized
+
+
+def _normalize_stream_options(stream_options, stream=True):
+    if stream_options is None:
+        return {"include_obfuscation": True} if stream else None
+    if not stream:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: stream_options requires stream=true")
+    if not isinstance(stream_options, dict):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: stream_options is not supported")
+    unknown_keys = set(stream_options) - {"include_obfuscation"}
+    if unknown_keys:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: stream_options is not supported")
+    include_obfuscation = stream_options.get("include_obfuscation", True)
+    if not isinstance(include_obfuscation, bool):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: stream_options.include_obfuscation is not supported")
+    return {"include_obfuscation": include_obfuscation}
 
 
 def _validate_supported_request_fields(body):
@@ -322,6 +344,8 @@ def _reasoning_item_payload(item_id, text, encrypted_content=None):
         "type": "reasoning",
         "summary": [{"type": "summary_text", "text": text}],
     }
+    if text:
+        item["content"] = [{"type": "reasoning_text", "text": text}]
     if encrypted_content is not None:
         item["encrypted_content"] = encrypted_content
     return item
@@ -376,6 +400,7 @@ def build_response_context(body, model=None):
         "include": _normalize_include(body.get("include")),
         "prompt_cache_key": body.get("prompt_cache_key"),
         "top_logprobs": body.get("top_logprobs"),
+        "stream_options": _normalize_stream_options(body.get("stream_options"), body.get("stream", True)),
     }
 
 
@@ -386,20 +411,37 @@ def _translate_tool_choice(tool_choice):
         return {"type": "none"}
     if tool_choice == "required":
         return {"type": "any"}
+    if isinstance(tool_choice, str):
+        raise UnsupportedFeatureError(f"Unsupported Responses API feature: tool_choice value {tool_choice} is not supported")
     if isinstance(tool_choice, dict):
         choice_type = tool_choice.get("type")
         if choice_type == "function":
-            return {
-                "type": "tool",
-                "name": tool_choice.get("name") or tool_choice.get("function", {}).get("name", ""),
-            }
+            name = tool_choice.get("name") or tool_choice.get("function", {}).get("name", "")
+            if not name:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.function requires a name")
+            return {"type": "tool", "name": name}
         if choice_type == "tool":
-            return {"type": "tool", "name": tool_choice.get("name", "")}
+            name = tool_choice.get("name", "")
+            if not name:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.tool requires a name")
+            return {"type": "tool", "name": name}
+        if choice_type == "custom":
+            name = tool_choice.get("name", "")
+            if not name:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.custom requires a name")
+            return {"type": "tool", "name": name}
+        if choice_type == "apply_patch":
+            return {"type": "tool", "name": "apply_patch"}
+        if choice_type == "shell":
+            return {"type": "tool", "name": "shell"}
         if choice_type == "none":
             return {"type": "none"}
         if choice_type == "required":
             return {"type": "any"}
-    return None
+        raise UnsupportedFeatureError(
+            f"Unsupported Responses API feature: tool_choice type {choice_type} is not supported"
+        )
+    raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice is not supported")
 
 
 def _allowed_tool_names(tool_choice):
@@ -423,6 +465,9 @@ def _thinking_from_reasoning(body, max_tokens):
     if not isinstance(reasoning, dict):
         return None
 
+    if reasoning.get("summary") is not None:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning.summary is not supported")
+
     effort = (reasoning.get("effort") or "").lower()
     if effort in {"", "none"}:
         return None
@@ -432,13 +477,16 @@ def _thinking_from_reasoning(body, max_tokens):
         "low": 0.20,
         "medium": 0.50,
         "high": 0.80,
+        "xhigh": 0.95,
     }
     ratio = ratios.get(effort)
     if ratio is None:
-        return None
+        raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning.effort is not supported")
 
     if not isinstance(max_tokens, int) or max_tokens <= 1024:
-        return None
+        raise UnsupportedFeatureError(
+            "Unsupported Responses API behavior: reasoning.effort requires max_output_tokens greater than 1024"
+        )
 
     budget_tokens = int(max_tokens * ratio)
     budget_tokens = max(1024, budget_tokens)
@@ -478,10 +526,21 @@ def _text_format_instruction(body):
         return None
 
     format_type = format_spec.get("type")
+    if format_type not in {"text", "json_schema", "json_object"}:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: text.format is not supported")
     if format_type == "json_schema":
         schema = format_spec.get("schema") or format_spec.get("json_schema", {}).get("schema")
         if schema:
             schema_json = json.dumps(schema, ensure_ascii=False, indent=2)
+            strict = format_spec.get("strict", True)
+            if strict not in (True, False, None):
+                raise UnsupportedFeatureError("Unsupported Responses API feature: text.format.strict is not supported")
+            if strict is False:
+                return (
+                    "You must respond with valid JSON that matches this JSON schema as closely as possible:\n"
+                    f"```json\n{schema_json}\n```\n"
+                    "Respond ONLY with the JSON object, no other text."
+                )
             return (
                 "You must respond with valid JSON that strictly follows this JSON schema:\n"
                 f"```json\n{schema_json}\n```\n"
@@ -490,6 +549,24 @@ def _text_format_instruction(body):
     if format_type == "json_object":
         return "You must respond with valid JSON. Respond ONLY with a JSON object, no other text."
     return None
+
+
+def _text_verbosity_instruction(body):
+    text_config = body.get("text")
+    if text_config is None:
+        return None
+    if not isinstance(text_config, dict):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: text is not supported")
+    verbosity = text_config.get("verbosity")
+    if verbosity is None:
+        return None
+    if verbosity == "low":
+        return "Keep the response concise."
+    if verbosity == "medium":
+        return "Use a moderate level of detail."
+    if verbosity == "high":
+        return "Provide a detailed response."
+    raise UnsupportedFeatureError("Unsupported Responses API feature: text.verbosity is not supported")
 
 
 def _iter_input_items(raw_input):
@@ -518,6 +595,7 @@ def translate_responses_request(body):
     if body.get("max_tool_calls") is not None:
         raise UnsupportedFeatureError("Unsupported Responses API feature: max_tool_calls is not supported")
     _normalize_include(body.get("include"))
+    _normalize_stream_options(body.get("stream_options"), body.get("stream", True))
     top_logprobs = body.get("top_logprobs")
     if top_logprobs not in (None, 0):
         raise UnsupportedFeatureError("Unsupported Responses API feature: top_logprobs is not supported")
@@ -545,6 +623,9 @@ def translate_responses_request(body):
     text_format_instruction = _text_format_instruction(body)
     if text_format_instruction:
         system_segments.append(text_format_instruction)
+    text_verbosity_instruction = _text_verbosity_instruction(body)
+    if text_verbosity_instruction:
+        system_segments.append(text_verbosity_instruction)
 
     allowed_tool_names = _allowed_tool_names(body.get("tool_choice"))
     tools = _translate_tools(body.get("tools", []))
@@ -558,10 +639,12 @@ def translate_responses_request(body):
         tool_choice_mode = tool_choice_input.get("mode")
         if tool_choice_mode == "required":
             tool_choice_input = "required"
-        elif tool_choice_mode == "none":
-            tool_choice_input = "none"
-        else:
+        elif tool_choice_mode == "auto":
             tool_choice_input = "auto"
+        else:
+            raise UnsupportedFeatureError(
+                "Unsupported Responses API feature: tool_choice.allowed_tools.mode is not supported"
+            )
 
     tool_choice = _translate_tool_choice(tool_choice_input)
     if tool_choice:
@@ -591,6 +674,10 @@ def translate_responses_request(body):
             role = item.get("role", "user")
             if role in {"developer", "system"}:
                 developer_blocks = _translate_content_blocks(item.get("content", []))
+                if any(block.get("type") != "text" for block in developer_blocks):
+                    raise UnsupportedFeatureError(
+                        "Unsupported Responses API feature: developer messages only support text content"
+                    )
                 developer_text = "\n\n".join(block.get("text", "") for block in developer_blocks).strip()
                 if developer_text:
                     system_segments.append(developer_text)
@@ -633,7 +720,7 @@ def translate_responses_request(body):
             continue
 
         if item_type == "reasoning":
-            continue
+            raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning input items are not supported")
 
         if item_type == "item_reference":
             raise UnsupportedFeatureError("Unsupported Responses API feature: item_reference is not supported")
@@ -769,6 +856,16 @@ class ResponsesEventTranslator:
         self.tool_done = set()
         self.ignored_tool_indexes = set()
         self.usage = {}
+
+    def _include_obfuscation(self):
+        stream_options = self.response_context.get("stream_options") or {}
+        return stream_options.get("include_obfuscation", True)
+
+    def _delta_payload(self, payload):
+        data = dict(payload)
+        if self._include_obfuscation():
+            data["obfuscation"] = secrets.token_hex(4)
+        return data
 
     def _assistant_output_index(self):
         return 0
@@ -1171,14 +1268,16 @@ class ResponsesEventTranslator:
                 events.append(
                     self._emit(
                         "response.output_text.delta",
-                        {
+                        self._delta_payload(
+                            {
                             "type": "response.output_text.delta",
                             "item_id": self._message_id(index),
                             "output_index": index,
                             "content_index": 0,
                             "delta": text,
                             "logprobs": [],
-                        },
+                            }
+                        ),
                     )
                 )
                 return events
@@ -1190,13 +1289,15 @@ class ResponsesEventTranslator:
                 events.append(
                     self._emit(
                         "response.reasoning_summary_text.delta",
-                        {
+                        self._delta_payload(
+                            {
                             "type": "response.reasoning_summary_text.delta",
                             "item_id": f"rs_{self.response_id}_{index}",
                             "output_index": index,
                             "summary_index": 0,
                             "delta": text,
-                        },
+                            }
+                        ),
                     )
                 )
                 return events
@@ -1213,12 +1314,14 @@ class ResponsesEventTranslator:
                 events.append(
                     self._emit(
                         event_spec["delta_event"],
-                        {
+                        self._delta_payload(
+                            {
                             "type": event_spec["delta_event"],
                             "item_id": self._tool_item_id(call_id),
                             "output_index": index,
                             "delta": partial,
-                        },
+                            }
+                        ),
                     )
                 )
                 return events

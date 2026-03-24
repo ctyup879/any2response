@@ -43,6 +43,7 @@ def test_translate_anthropic_sse_to_responses_events():
 
     delta_event = next(event for event in events if event["event"] == "response.output_text.delta")
     assert delta_event["data"]["delta"] == "Hello"
+    assert "obfuscation" in delta_event["data"]
 
     completed_event = events[-1]
     assert completed_event["data"]["response"]["status"] == "completed"
@@ -200,6 +201,32 @@ def test_translate_anthropic_reasoning_and_text_share_same_output_index():
     assert reasoning_added["data"]["output_index"] == 0
     assert message_added["data"]["output_index"] == 0
     assert text_delta["data"]["output_index"] == 0
+
+
+def test_translate_anthropic_stream_omits_obfuscation_when_disabled():
+    translator = ResponsesEventTranslator(response_context={"stream_options": {"include_obfuscation": False}})
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Hello"},
+        },
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    delta_event = next(event for event in events if event["event"] == "response.output_text.delta")
+
+    assert "obfuscation" not in delta_event["data"]
 
 
 def test_translate_anthropic_tool_use_stream_to_function_call_events():
@@ -385,6 +412,42 @@ def test_translate_anthropic_stream_completed_includes_usage_details():
 
     assert completed["data"]["response"]["usage"]["input_tokens_details"] == {"cached_tokens": 0}
     assert completed["data"]["response"]["usage"]["output_tokens_details"] == {"reasoning_tokens": 0}
+
+
+def test_translate_anthropic_reasoning_done_item_includes_reasoning_text_content():
+    translator = ResponsesEventTranslator()
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_reasoning"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "thinking_delta", "thinking": "Planning"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "reasoning"
+    )
+    completed = next(event for event in events if event["event"] == "response.completed")
+
+    assert done["data"]["item"]["content"] == [{"type": "reasoning_text", "text": "Planning"}]
+    assert completed["data"]["response"]["output"][0]["content"] == [
+        {"type": "reasoning_text", "text": "Planning"}
+    ]
 
 
 def test_translate_anthropic_stream_rejects_multiple_tool_calls_when_parallel_disabled():
