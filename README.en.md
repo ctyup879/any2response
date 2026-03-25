@@ -3,6 +3,11 @@
 [English](README.en.md) | [简体中文](README.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](#quick-start)
+[![Protocol](https://img.shields.io/badge/API-OpenAI%20Responses-green.svg)](#protocol-coverage)
+[![Upstream](https://img.shields.io/badge/Upstream-MiniMax%20Anthropic-orange.svg)](#current-scope)
+[![Runtime](https://img.shields.io/badge/Runtime-FastAPI-009688.svg)](#architecture)
+[![Codex](https://img.shields.io/badge/Codex-m128py-black.svg)](#codex-integration)
 
 `any2response` is a lightweight local proxy that translates upstream model APIs into the OpenAI Responses protocol.
 
@@ -13,6 +18,15 @@ The current implementation focuses on one practical path:
 - output: OpenAI Responses-compatible responses and streaming events
 
 This makes it possible to plug tools such as `codex` into a single local `/v1/responses` endpoint while keeping the upstream provider behind a translation layer.
+
+## Summary
+
+- project name: `any2response`
+- primary endpoint: `/v1/responses`
+- current input protocol: OpenAI Responses
+- current upstream protocol: MiniMax Anthropic-compatible Messages API
+- current focus: a local unified proxy for `codex` and tool-calling workflows
+- deployment style: local process or persistent `systemd --user` service
 
 ## Why
 

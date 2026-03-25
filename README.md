@@ -3,6 +3,11 @@
 [English](README.en.md) | [简体中文](README.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](#快速开始)
+[![Protocol](https://img.shields.io/badge/API-OpenAI%20Responses-green.svg)](#协议支持范围)
+[![Upstream](https://img.shields.io/badge/Upstream-MiniMax%20Anthropic-orange.svg)](#当前范围)
+[![Runtime](https://img.shields.io/badge/Runtime-FastAPI-009688.svg)](#架构)
+[![Codex](https://img.shields.io/badge/Codex-m128py-black.svg)](#codex-接入)
 
 `any2response` 是一个轻量级的本地代理服务，用于把上游模型 API 转换成 OpenAI Responses 协议。
 
@@ -13,6 +18,15 @@
 - 输出：OpenAI Responses 兼容响应与流式事件
 
 这样可以把 `codex` 等客户端统一接到本地 `/v1/responses` 端点上，同时把上游供应商差异隔离在代理层内。
+
+## 项目摘要
+
+- 项目名称：`any2response`
+- 默认接口：`/v1/responses`
+- 当前输入协议：OpenAI Responses
+- 当前上游协议：MiniMax Anthropic-compatible Messages API
+- 当前定位：面向 `codex` 和工具调用工作流的本地统一代理层
+- 部署方式：本地运行或 `systemd --user` 常驻服务
 
 ## 为什么要用它
 
