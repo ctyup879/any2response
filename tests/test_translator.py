@@ -224,6 +224,37 @@ def test_translate_responses_request_rejects_function_tool_with_non_object_param
         )
 
 
+def test_translate_responses_request_rejects_function_tool_with_non_object_schema_type():
+    with pytest.raises(UnsupportedFeatureError, match="tool parameters"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "tools": [{"type": "function", "name": "echo", "parameters": {"type": "string"}}],
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        {"type": "function", "name": "echo", "description": 123, "parameters": {"type": "object"}},
+        {"type": "custom", "name": "matcher", "description": 123, "format": {"type": "text"}},
+        {"type": "apply_patch", "description": 123},
+        {"type": "shell", "description": 123},
+    ],
+)
+def test_translate_responses_request_rejects_non_string_tool_descriptions(tool):
+    with pytest.raises(UnsupportedFeatureError, match="tool description"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "tools": [tool],
+            }
+        )
+
+
 def test_translate_responses_request_rejects_named_unsupported_tools():
     request_body = {
         "model": "codex-MiniMax-M2.7",
@@ -1624,6 +1655,21 @@ def test_translate_responses_request_ignores_unselected_unnamed_hosted_tools():
     ]
 
 
+def test_translate_responses_request_rejects_only_unnamed_hosted_tools():
+    with pytest.raises(UnsupportedFeatureError, match="tool type"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "tools": [
+                    {"type": "web_search"},
+                    {"type": "file_search"},
+                ],
+                "tool_choice": "auto",
+            }
+        )
+
+
 def test_build_response_context_ignores_unselected_unnamed_hosted_tools():
     response_context = build_response_context(
         {
@@ -1645,6 +1691,20 @@ def test_build_response_context_ignores_unselected_unnamed_hosted_tools():
             "strict": True,
         }
     ]
+
+
+def test_build_response_context_rejects_only_unnamed_hosted_tools():
+    with pytest.raises(UnsupportedFeatureError, match="tool type"):
+        build_response_context(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "tools": [
+                    {"type": "web_search"},
+                    {"type": "file_search"},
+                ],
+            }
+        )
 
 
 def test_translate_responses_request_rejects_nonzero_top_logprobs():
@@ -2929,6 +2989,26 @@ def test_translate_responses_request_rejects_unknown_tool_choice_string():
                 "model": "codex-MiniMax-M2.7",
                 "input": "hello",
                 "tool_choice": "banana",
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        {"type": "function", "name": "   "},
+        {"type": "tool", "name": "   "},
+        {"type": "custom", "name": "   "},
+        {"type": "function", "function": {"name": "   "}},
+    ],
+)
+def test_translate_responses_request_rejects_blank_tool_choice_names(tool_choice):
+    with pytest.raises(UnsupportedFeatureError, match="tool_choice"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "tool_choice": tool_choice,
             }
         )
 

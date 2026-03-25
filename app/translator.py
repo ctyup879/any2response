@@ -33,6 +33,17 @@ IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES = {
     "image_generation",
 }
 
+SUPPORTED_LOCAL_TOOL_TYPES = {None, "function", "custom", "apply_patch", "shell"}
+
+
+def _has_supported_local_tool(tools):
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        if tool.get("type") in SUPPORTED_LOCAL_TOOL_TYPES:
+            return True
+    return False
+
 
 RESPONSE_COMPLETED_STOP_REASONS = {None, "end_turn", "stop_sequence", "tool_use", "refusal"}
 RESPONSE_INCOMPLETE_STOP_REASONS = {
@@ -248,6 +259,14 @@ def _normalize_user(value):
     return value
 
 
+def _normalize_tool_description(description):
+    if description is None:
+        return ""
+    if not isinstance(description, str):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: tool description is not supported")
+    return description
+
+
 def _normalize_stream(value):
     if value is None:
         return True
@@ -372,7 +391,7 @@ def _normalize_shell_skill(skill):
 
 
 def _custom_tool_description(description, format_spec):
-    description = description or ""
+    description = _normalize_tool_description(description)
     format_type = format_spec.get("type", "text")
     if format_type == "text":
         return description
@@ -559,8 +578,7 @@ def _normalize_tool_call_output_value(value):
 
 
 def _builtin_tool_description(tool_type, description, environment=None):
-    description = description or ""
-    return description
+    return _normalize_tool_description(description)
 
 
 def _require_named_tool(tool_type, tool_name):
@@ -581,7 +599,15 @@ def _normalize_function_parameters(tool):
         return {"type": "object", "properties": {}}
     if not isinstance(parameters, dict):
         raise UnsupportedFeatureError("Unsupported Responses API feature: tool parameters must be an object")
+    if parameters.get("type") not in (None, "object"):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: tool parameters must be an object")
     return parameters
+
+
+def _normalize_tool_choice_name(name, feature_name):
+    if not isinstance(name, str) or not name.strip():
+        raise UnsupportedFeatureError(f"Unsupported Responses API feature: {feature_name} requires a name")
+    return name.strip()
 
 
 def _parse_tool_call_arguments(value):
@@ -619,16 +645,16 @@ def _parse_apply_patch_operation(value):
 def _translate_tools(tools):
     if tools is not None and not isinstance(tools, list):
         raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
-    total_tools = len(tools or [])
+    has_supported_local_tool = _has_supported_local_tool(tools)
     translated = []
     for tool in tools or []:
         if not isinstance(tool, dict):
             raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
         tool_type = tool.get("type")
         tool_name = tool.get("name") or tool.get("function", {}).get("name", "")
-        if tool_type in IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES and not tool_name and total_tools > 1:
+        if tool_type in IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES and not tool_name and has_supported_local_tool:
             continue
-        if tool_type not in {None, "function", "custom", "apply_patch", "shell"}:
+        if tool_type not in SUPPORTED_LOCAL_TOOL_TYPES:
             raise UnsupportedFeatureError(
                 f"Unsupported Responses API tool type: {tool_type}"
             )
@@ -644,7 +670,8 @@ def _translate_tools(tools):
                     "name": tool_name,
                     "description": _custom_tool_description(
                         tool.get("description")
-                        or tool.get("function", {}).get("description", ""),
+                        if "description" in tool
+                        else tool.get("function", {}).get("description"),
                         format_spec,
                     ),
                     "input_schema": _custom_tool_input_schema(format_spec),
@@ -658,7 +685,9 @@ def _translate_tools(tools):
                     "name": tool_name,
                     "description": _builtin_tool_description(
                         tool_type,
-                        tool.get("description") or tool.get("function", {}).get("description", ""),
+                        tool.get("description")
+                        if "description" in tool
+                        else tool.get("function", {}).get("description"),
                         environment,
                     ),
                     "input_schema": _builtin_tool_input_schema(tool_type, environment=environment),
@@ -668,8 +697,11 @@ def _translate_tools(tools):
         translated.append(
             {
                 "name": tool_name,
-                "description": tool.get("description")
-                or tool.get("function", {}).get("description", ""),
+                "description": _normalize_tool_description(
+                    tool.get("description")
+                    if "description" in tool
+                    else tool.get("function", {}).get("description")
+                ),
                 "input_schema": _normalize_function_parameters(tool),
             }
         )
@@ -1041,7 +1073,7 @@ def _reasoning_input_text(item):
 def _normalize_response_tools(tools):
     if tools is not None and not isinstance(tools, list):
         raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
-    total_tools = len(tools or [])
+    has_supported_local_tool = _has_supported_local_tool(tools)
     normalized = []
     for tool in tools or []:
         if not isinstance(tool, dict):
@@ -1049,13 +1081,15 @@ def _normalize_response_tools(tools):
         normalized_tool = dict(tool)
         tool_type = normalized_tool.get("type")
         tool_name = normalized_tool.get("name") or normalized_tool.get("function", {}).get("name", "")
-        if tool_type in IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES and not tool_name and total_tools > 1:
+        if tool_type in IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES and not tool_name and has_supported_local_tool:
             continue
-        if tool_type not in {None, "function", "custom", "apply_patch", "shell"}:
+        if tool_type not in SUPPORTED_LOCAL_TOOL_TYPES:
             raise UnsupportedFeatureError(f"Unsupported Responses API tool type: {tool_type}")
         if tool_type in {"apply_patch", "shell"} and not normalized_tool.get("name"):
             normalized_tool["name"] = tool_type
         normalized_tool["name"] = _require_named_tool(tool_type, normalized_tool.get("name") or normalized_tool.get("function", {}).get("name", ""))
+        if "description" in normalized_tool:
+            normalized_tool["description"] = _normalize_tool_description(normalized_tool.get("description"))
         if tool_type == "custom" and "format" not in normalized_tool:
             normalized_tool["format"] = {"type": "text"}
         if tool_type in {None, "function"} and "strict" not in normalized_tool:
@@ -1234,19 +1268,16 @@ def _translate_tool_choice(tool_choice):
     if isinstance(tool_choice, dict):
         choice_type = tool_choice.get("type")
         if choice_type == "function":
-            name = tool_choice.get("name") or tool_choice.get("function", {}).get("name", "")
-            if not name:
-                raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.function requires a name")
+            name = tool_choice.get("name")
+            if name is None and isinstance(tool_choice.get("function"), dict):
+                name = tool_choice["function"].get("name")
+            name = _normalize_tool_choice_name(name, "tool_choice.function")
             return {"type": "tool", "name": name}
         if choice_type == "tool":
-            name = tool_choice.get("name", "")
-            if not name:
-                raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.tool requires a name")
+            name = _normalize_tool_choice_name(tool_choice.get("name"), "tool_choice.tool")
             return {"type": "tool", "name": name}
         if choice_type == "custom":
-            name = tool_choice.get("name", "")
-            if not name:
-                raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.custom requires a name")
+            name = _normalize_tool_choice_name(tool_choice.get("name"), "tool_choice.custom")
             return {"type": "tool", "name": name}
         if choice_type == "apply_patch":
             return {"type": "tool", "name": "apply_patch"}
