@@ -40,6 +40,22 @@ client / codex
     -> OpenAI Responses output
 ```
 
+```mermaid
+flowchart LR
+    A[client / codex] --> B[local /v1/responses]
+    B --> C[FastAPI app/main.py]
+    C --> D[translator.py\nResponses -> Anthropic]
+    D --> E[client.py\nHTTP upstream client]
+    E --> F[MiniMax Anthropic-compatible API]
+    F --> E
+    E --> G[translator.py\nAnthropic -> Responses]
+    G --> H[OpenAI Responses output\nJSON / SSE]
+    H --> A
+
+    I[Authorization: Bearer PROXY_API_KEY] -. local auth .-> B
+    J[MINIMAX_API_KEY] -. upstream auth .-> E
+```
+
 Main components:
 
 - `app/main.py`: FastAPI entrypoint and HTTP surface
