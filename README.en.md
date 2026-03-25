@@ -128,6 +128,32 @@ The proxy listens on:
 http://127.0.0.1:8765/v1/responses
 ```
 
+## Run with Docker
+
+Build the image:
+
+```bash
+docker build -t any2response:latest .
+```
+
+Run the container:
+
+```bash
+docker run --rm \
+  -p 8765:8765 \
+  -e MINIMAX_API_KEY=your-real-minimax-key \
+  -e PROXY_API_KEY=your-local-proxy-key \
+  any2response:latest
+```
+
+The container defaults to:
+
+- bind to `0.0.0.0`
+- `PORT=8765`
+- `REQUEST_LOG_PATH=/app/last_request.json`
+
+If you want to persist request logs on the host, override `REQUEST_LOG_PATH` and mount a volume.
+
 ## Run as a User Service
 
 Install and enable the `systemd --user` unit:
@@ -292,6 +318,12 @@ Run the test suite:
 
 ```bash
 .venv/bin/pytest -q
+```
+
+Build the container image:
+
+```bash
+docker build -t any2response:latest .
 ```
 
 ## Repository

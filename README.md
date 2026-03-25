@@ -128,6 +128,32 @@ UPSTREAM_BASE_URL=https://api.minimaxi.com/anthropic/v1/messages?beta=true
 http://127.0.0.1:8765/v1/responses
 ```
 
+## Docker 运行
+
+构建镜像：
+
+```bash
+docker build -t any2response:latest .
+```
+
+运行容器：
+
+```bash
+docker run --rm \
+  -p 8765:8765 \
+  -e MINIMAX_API_KEY=你的 MiniMax Key \
+  -e PROXY_API_KEY=你的本地代理 Key \
+  any2response:latest
+```
+
+容器内默认会使用：
+
+- 固定监听 `0.0.0.0`
+- `PORT=8765`
+- `REQUEST_LOG_PATH=/app/last_request.json`
+
+如果你想把请求日志持久化到宿主机，可以自行覆盖 `REQUEST_LOG_PATH` 并挂载卷。
+
 ## 作为用户服务运行
 
 安装并启用 `systemd --user` 服务：
@@ -292,6 +318,12 @@ codex exec --profile m128py "Read README.md, then reply with only the first head
 
 ```bash
 .venv/bin/pytest -q
+```
+
+构建容器镜像：
+
+```bash
+docker build -t any2response:latest .
 ```
 
 ## 仓库地址

@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from app.main import create_app
@@ -115,6 +117,34 @@ def test_post_responses_non_stream():
     assert data["usage"]["input_tokens_details"] == {"cached_tokens": 0}
     assert data["usage"]["output_tokens_details"] == {"reasoning_tokens": 0}
     assert data["output"][0]["content"][0]["text"] == "Hello from MiniMax"
+
+
+def test_post_responses_writes_request_log_to_configured_path(tmp_path):
+    upstream = FakeUpstreamClient()
+    log_path = tmp_path / "logs" / "last_request.json"
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+            "request_log_path": str(log_path),
+        },
+        upstream_client=upstream,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": False,
+            "input": "hello",
+        },
+    )
+
+    assert response.status_code == 200
+    assert log_path.exists()
+    assert json.loads(log_path.read_text(encoding="utf-8"))["input"] == "hello"
 
 
 def test_post_responses_stream():

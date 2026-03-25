@@ -30,6 +30,17 @@ def _error_response(status_code, message, error_type="invalid_request_error"):
     )
 
 
+def _write_last_request(body, request_log_path):
+    if not request_log_path:
+        return
+    path = Path(request_log_path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(body, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
 def create_app(settings_override=None, upstream_client=None):
     settings = load_settings(settings_override)
     client = upstream_client or MiniMaxClient(settings)
@@ -48,10 +59,7 @@ def create_app(settings_override=None, upstream_client=None):
             return _error_response(401, "Unauthorized", "authentication_error")
 
         body = await request.json()
-        Path("/root/minimaxdemo/last_request.json").write_text(
-            json.dumps(body, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        _write_last_request(body, settings.request_log_path)
         try:
             translated = translate_responses_request(body)
             response_context = build_response_context(body, model=translated.get("model"))
