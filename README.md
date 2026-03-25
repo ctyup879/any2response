@@ -113,8 +113,14 @@ MINIMAX_API_KEY=你的 MiniMax Key
 PROXY_API_KEY=你的本地代理 Key
 HOST=127.0.0.1
 PORT=8765
+UPSTREAM_COMPAT_PROFILE=minimax
 UPSTREAM_BASE_URL=https://api.minimaxi.com/anthropic/v1/messages?beta=true
 ```
+
+`UPSTREAM_COMPAT_PROFILE` 目前支持：
+
+- `minimax`：按 MiniMax 当前 Anthropic 兼容能力收紧，普通消息里的 `input_image` / `input_file` 以及 `stop` 会本地拒绝
+- `anthropic`：保留标准 Anthropic 兼容翻译，允许普通消息里的 `input_image` / `input_file` 与 `stop`
 
 ### 启动
 
@@ -143,6 +149,7 @@ docker run --rm \
   -p 8765:8765 \
   -e MINIMAX_API_KEY=你的 MiniMax Key \
   -e PROXY_API_KEY=你的本地代理 Key \
+  -e UPSTREAM_COMPAT_PROFILE=minimax \
   any2response:latest
 ```
 
@@ -253,19 +260,16 @@ codex exec --profile m128py "Read README.md, then reply with only the first head
 - 对应的工具输出项
 - 消息内嵌 `tool_use` 与 `tool_result`
 - 文本输入
-- `data:` URL 或 `http(s)` URL 图片输入
-- 内联 text、JSON、image、PDF 文件输入
+- `UPSTREAM_COMPAT_PROFILE=anthropic` 下的 `data:` URL 或 `http(s)` URL 图片输入
+- `UPSTREAM_COMPAT_PROFILE=anthropic` 下的内联 text、JSON、image、PDF 文件输入
 - 显式提供时的 `max_output_tokens`
 - `temperature`
 - `top_p`
-- `stop`
+- `UPSTREAM_COMPAT_PROFILE=anthropic` 下的 `stop`
 - `text.format` 和旧版 `response_format`
 - best-effort 的 `text.verbosity`
-- `prompt_cache_key` 响应上下文保留
 - 对 `parallel_tool_calls: false` 的代理侧约束
-- `reasoning.effort`
-- `reasoning.summary`
-- 已废弃的 `reasoning.generate_summary`
+- `include=["reasoning.encrypted_content"]` 的 proxy-local replay bridge
 - 文本流式增量
 - reasoning 流式增量
 - 工具参数流式增量
@@ -285,13 +289,14 @@ codex exec --profile m128py "Read README.md, then reply with only the first head
 - `prompt_cache_retention`
 - `safety_identifier`
 - `service_tier`
-- `input_file.file_id`
-- `input_image.file_id`
-- 非 `auto` 的 `input_image.detail`
+- 所有 provider 下的 `input_file.file_id`
+- 所有 provider 下的 `input_image.file_id`
+- 所有 provider 下的非 `auto` `input_image.detail`
+- `UPSTREAM_COMPAT_PROFILE=minimax` 下普通消息里的 `input_image` / `input_file`
 - 远程文本文件抓取和大多数非文本/非图片/非 PDF 文件类型
 - `file_search`、`web_search`、`computer_use`、`code_interpreter`、`mcp` 等 hosted / remote OpenAI tools
 - 完整 OpenAI reasoning replay 语义
-- 非空 `include`
+- 除 `reasoning.encrypted_content` 之外的 `include` 值
 - 所有 `top_logprobs`
 - `syntax: "lark"` 的 custom tool grammar
 - annotations / citations 一类响应增强字段
@@ -301,6 +306,10 @@ codex exec --profile m128py "Read README.md, then reply with only the first head
 - assistant `phase` 目前是代理层 bridge，不是原样上游字段保留
 - `commentary` 会映射成 Anthropic `thinking`
 - `output_text` 只反映 assistant `final_answer` 文本
+- `prompt_cache_key` 仅做响应上下文保留 / 回显，不会转发到 MiniMax 上游
+- `reasoning.effort` 会近似映射为 Anthropic `thinking.budget_tokens`，不是原生等价字段
+- `reasoning.summary` 和已废弃的 `reasoning.generate_summary` 由代理基于返回的 `thinking` 文本生成，不是上游原生摘要控制
+- `reasoning.encrypted_content` 目前是 proxy-local opaque bridge：本代理生成的值可由本代理回放，不等同于 OpenAI 原生可移植语义
 - function tools 的 `strict=false` 为 Codex 兼容而接受，但不会被上游强制执行
 - Codex 默认注入且未显式选中的 unnamed hosted tools（例如 `web_search`）会在本地被过滤，不会转发到上游
 - 非法请求形状会在本地直接拒绝，而不是静默规范化

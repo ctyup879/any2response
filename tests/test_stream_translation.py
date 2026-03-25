@@ -213,7 +213,7 @@ def test_translate_anthropic_thinking_block_uses_concise_summary_when_requested(
     assert summary_done["data"]["text"] == "First sentence."
 
 
-def test_translate_anthropic_thinking_block_omits_reasoning_encrypted_content_even_if_requested():
+def test_translate_anthropic_thinking_block_includes_reasoning_encrypted_content_when_signature_available():
     translator = ResponsesEventTranslator(
         response_context={"include": ["reasoning.encrypted_content"]},
     )
@@ -224,12 +224,17 @@ def test_translate_anthropic_thinking_block_omits_reasoning_encrypted_content_ev
         {
             "type": "content_block_start",
             "index": 0,
-            "content_block": {"type": "thinking", "thinking": "", "signature": "enc_sig_456"},
+            "content_block": {"type": "thinking", "thinking": ""},
         },
         {
             "type": "content_block_delta",
             "index": 0,
             "delta": {"type": "thinking_delta", "thinking": "Planning"},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "enc_sig_456"},
         },
         {"type": "content_block_stop", "index": 0},
         {"type": "message_stop"},
@@ -245,8 +250,8 @@ def test_translate_anthropic_thinking_block_omits_reasoning_encrypted_content_ev
     )
     completed = next(event for event in events if event["event"] == "response.completed")
 
-    assert "encrypted_content" not in done["data"]["item"]
-    assert "encrypted_content" not in completed["data"]["response"]["output"][0]
+    assert done["data"]["item"]["encrypted_content"].startswith("a2r_reasoning_v1:")
+    assert completed["data"]["response"]["output"][0]["encrypted_content"].startswith("a2r_reasoning_v1:")
 
 
 def test_translate_anthropic_thinking_block_omits_reasoning_encrypted_content_when_upstream_missing():

@@ -261,7 +261,7 @@ def test_post_responses_stream_emits_error_for_parallel_tool_call_violation():
     assert "data: [DONE]" in response.text
 
 
-def test_post_responses_rejects_nonempty_include_requests():
+def test_post_responses_supports_reasoning_encrypted_content_include_requests():
     app = create_app(
         {
             "proxy_api_key": "proxy-secret",
@@ -282,9 +282,8 @@ def test_post_responses_rejects_nonempty_include_requests():
         },
     )
 
-    assert response.status_code == 400
-    assert response.json()["error"]["type"] == "unsupported_feature"
-    assert "include" in response.json()["error"]["message"]
+    assert response.status_code == 200
+    assert response.json()["output"][0]["type"] == "message"
 
 
 def test_post_responses_rejects_zero_top_logprobs():

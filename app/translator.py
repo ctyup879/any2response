@@ -34,6 +34,9 @@ IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES = {
 }
 
 SUPPORTED_LOCAL_TOOL_TYPES = {None, "function", "custom", "apply_patch", "shell"}
+SUPPORTED_PROVIDER_PROFILES = {"minimax", "anthropic", "generic"}
+SUPPORTED_INCLUDE_VALUES = {"reasoning.encrypted_content"}
+REASONING_BRIDGE_PREFIX = "a2r_reasoning_v1:"
 
 
 def _has_supported_local_tool(tools):
@@ -93,6 +96,27 @@ def _parse_data_url(value):
     media_type = header[5:].split(";", 1)[0] or "application/octet-stream"
     is_base64 = ";base64" in header
     return {"media_type": media_type, "data": data, "is_base64": is_base64}
+
+
+def _normalize_provider_profile(provider_profile):
+    if provider_profile is None:
+        return "minimax"
+    if not isinstance(provider_profile, str):
+        raise UnsupportedFeatureError("Unsupported upstream capability profile")
+    normalized = provider_profile.strip().lower()
+    if normalized not in SUPPORTED_PROVIDER_PROFILES:
+        raise UnsupportedFeatureError("Unsupported upstream capability profile")
+    if normalized == "generic":
+        return "anthropic"
+    return normalized
+
+
+def _provider_supports_message_media(provider_profile):
+    return _normalize_provider_profile(provider_profile) != "minimax"
+
+
+def _provider_supports_stop_sequences(provider_profile):
+    return _normalize_provider_profile(provider_profile) != "minimax"
 
 
 def _guess_media_type(filename_or_url):
@@ -185,12 +209,15 @@ def _is_finite_number(value):
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
 
 
-def _normalize_temperature(value):
+def _normalize_temperature(value, provider_profile="minimax"):
     if value is None:
         return None
     if not _is_finite_number(value):
         raise UnsupportedFeatureError("Unsupported Responses API feature: temperature is not supported")
-    if value < 0 or value > 2:
+    normalized_profile = _normalize_provider_profile(provider_profile)
+    if value < 0 or value > 1:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: temperature is not supported")
+    if normalized_profile == "minimax" and value == 0:
         raise UnsupportedFeatureError("Unsupported Responses API feature: temperature is not supported")
     return value
 
@@ -205,9 +232,11 @@ def _normalize_top_p(value):
     return value
 
 
-def _normalize_stop(value):
+def _normalize_stop(value, provider_profile="minimax"):
     if value is None:
         return None
+    if not _provider_supports_stop_sequences(provider_profile):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: stop is not supported")
     if isinstance(value, str):
         return [value]
     if not isinstance(value, list) or not value:
@@ -284,11 +313,11 @@ def _normalize_instructions(value):
     return value
 
 
-def _validate_request_scalar_fields(body):
+def _validate_request_scalar_fields(body, provider_profile="minimax"):
     _normalize_max_output_tokens(body.get("max_output_tokens"))
-    _normalize_temperature(body.get("temperature"))
+    _normalize_temperature(body.get("temperature"), provider_profile=provider_profile)
     _normalize_top_p(body.get("top_p"))
-    _normalize_stop(body.get("stop"))
+    _normalize_stop(body.get("stop"), provider_profile=provider_profile)
     _normalize_parallel_tool_calls(body.get("parallel_tool_calls"))
     _normalize_metadata(body.get("metadata"))
     _normalize_user(body.get("user"))
@@ -480,7 +509,7 @@ def _translate_file_block(item):
     raise UnsupportedFeatureError(f"Unsupported input_file media type: {media_type}")
 
 
-def _translate_content_blocks(content):
+def _translate_content_blocks(content, allow_message_media=True):
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
 
@@ -500,12 +529,20 @@ def _translate_content_blocks(content):
             blocks.append({"type": "text", "text": text})
             continue
         if item_type in {"input_image", "image_url"}:
+            if not allow_message_media:
+                raise UnsupportedFeatureError(
+                    "Unsupported Responses API feature: input_image is not supported by the upstream capability profile"
+                )
             instruction = _image_detail_instruction(item.get("detail"))
             if instruction:
                 blocks.append({"type": "text", "text": instruction})
             blocks.append(_translate_image_block(item))
             continue
         if item_type in {"input_file", "file"}:
+            if not allow_message_media:
+                raise UnsupportedFeatureError(
+                    "Unsupported Responses API feature: input_file is not supported by the upstream capability profile"
+                )
             blocks.append(_translate_file_block(item))
             continue
         if item_type in {"thinking", "redacted_thinking"}:
@@ -713,9 +750,13 @@ def _normalize_include(include):
         return []
     if not isinstance(include, list):
         raise UnsupportedFeatureError("Unsupported Responses API include value")
-    if include:
-        raise UnsupportedFeatureError("Unsupported Responses API feature: include is not supported")
-    return []
+    normalized = []
+    for item in include:
+        if item not in SUPPORTED_INCLUDE_VALUES:
+            raise UnsupportedFeatureError("Unsupported Responses API feature: include is not supported")
+        if item not in normalized:
+            normalized.append(item)
+    return normalized
 
 
 def _normalize_stream_options(stream_options, stream=True):
@@ -1000,8 +1041,76 @@ def _usage_payload(usage):
     }
 
 
+def _encode_reasoning_bridge_block(block, content_text=None):
+    if not isinstance(block, dict):
+        return None
+    block_type = block.get("type")
+    if block_type not in {"thinking", "redacted_thinking"}:
+        return None
+    payload = {"type": block_type}
+    thinking_text = content_text if isinstance(content_text, str) and content_text else None
+    if thinking_text is None:
+        if isinstance(block.get("thinking"), str) and block.get("thinking"):
+            thinking_text = block["thinking"]
+        elif isinstance(block.get("text"), str) and block.get("text"):
+            thinking_text = block["text"]
+    if thinking_text:
+        payload["thinking"] = thinking_text
+    for field_name in ("signature", "data"):
+        value = block.get(field_name)
+        if isinstance(value, str) and value:
+            payload[field_name] = value
+    if "signature" not in payload and "data" not in payload:
+        return None
+    encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).decode(
+        "ascii"
+    )
+    return f"{REASONING_BRIDGE_PREFIX}{encoded}"
+
+
+def _decode_reasoning_bridge_block(value):
+    if not isinstance(value, str) or not value.startswith(REASONING_BRIDGE_PREFIX):
+        raise UnsupportedFeatureError(
+            "Unsupported Responses API feature: reasoning.encrypted_content replay is not supported"
+        )
+    encoded = value[len(REASONING_BRIDGE_PREFIX) :]
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+        payload = json.loads(raw.decode("utf-8"))
+    except (binascii.Error, ValueError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise UnsupportedFeatureError(
+            "Unsupported Responses API feature: reasoning.encrypted_content replay is not supported"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise UnsupportedFeatureError(
+            "Unsupported Responses API feature: reasoning.encrypted_content replay is not supported"
+        )
+    block_type = payload.get("type")
+    if block_type not in {"thinking", "redacted_thinking"}:
+        raise UnsupportedFeatureError(
+            "Unsupported Responses API feature: reasoning.encrypted_content replay is not supported"
+        )
+    block = {"type": block_type}
+    if isinstance(payload.get("thinking"), str) and payload.get("thinking"):
+        block["thinking"] = payload["thinking"]
+    for field_name in ("signature", "data"):
+        field_value = payload.get(field_name)
+        if isinstance(field_value, str) and field_value:
+            block[field_name] = field_value
+    if "signature" not in block and "data" not in block:
+        raise UnsupportedFeatureError(
+            "Unsupported Responses API feature: reasoning.encrypted_content replay is not supported"
+        )
+    return block
+
+
 def _reasoning_encrypted_content(block, response_context=None, content_text=None):
-    return None
+    include = []
+    if isinstance(response_context, dict):
+        include = response_context.get("include", []) or []
+    if "reasoning.encrypted_content" not in include:
+        return None
+    return _encode_reasoning_bridge_block(block, content_text=content_text)
 
 
 def _reasoning_summary_text(text, response_context=None):
@@ -1043,10 +1152,6 @@ def _reasoning_item_payload(item_id, summary_text, content_text=None, encrypted_
 
 
 def _reasoning_input_text(item):
-    if item.get("encrypted_content") is not None:
-        raise UnsupportedFeatureError(
-            "Unsupported Responses API feature: reasoning.encrypted_content replay is not supported"
-        )
     content = item.get("content")
     if isinstance(content, list):
         text_parts = []
@@ -1068,6 +1173,20 @@ def _reasoning_input_text(item):
         if text_parts:
             return " ".join(text_parts)
     raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning input items require textual content")
+
+
+def _reasoning_input_block(item):
+    if item.get("encrypted_content") is not None:
+        block = _decode_reasoning_bridge_block(item.get("encrypted_content"))
+        if "thinking" not in block:
+            fallback_text = _reasoning_input_text(item)
+            if fallback_text:
+                block["thinking"] = fallback_text
+        return block
+    return {
+        "type": "thinking",
+        "thinking": _reasoning_input_text(item),
+    }
 
 
 def _normalize_response_tools(tools):
@@ -1221,7 +1340,7 @@ def _builtin_tool_output_is_error(item):
     return False
 
 
-def build_response_context(body, model=None):
+def build_response_context(body, model=None, provider_profile="minimax"):
     body = _require_request_object(body)
     stream = _normalize_stream(body.get("stream"))
     instructions = _normalize_instructions(body.get("instructions"))
@@ -1233,7 +1352,7 @@ def build_response_context(body, model=None):
         else:
             text_config = {"format": {"type": "text"}}
 
-    _validate_request_scalar_fields(body)
+    _validate_request_scalar_fields(body, provider_profile=provider_profile)
     reasoning = _normalize_reasoning_config(body.get("reasoning"))
 
     return {
@@ -1246,7 +1365,9 @@ def build_response_context(body, model=None):
         "tool_choice": body.get("tool_choice", "auto"),
         "tools": _effective_response_tools(body),
         "text": text_config,
-        "temperature": _normalize_temperature(body.get("temperature")) if body.get("temperature") is not None else 1.0,
+        "temperature": _normalize_temperature(body.get("temperature"), provider_profile=provider_profile)
+        if body.get("temperature") is not None
+        else 1.0,
         "top_p": _normalize_top_p(body.get("top_p")) if body.get("top_p") is not None else 1.0,
         "parallel_tool_calls": _normalize_parallel_tool_calls(body.get("parallel_tool_calls")),
         "reasoning": reasoning,
@@ -1448,10 +1569,11 @@ def _iter_input_items(raw_input):
     raise UnsupportedFeatureError("Unsupported Responses API feature: input is not supported")
 
 
-def translate_responses_request(body):
+def translate_responses_request(body, provider_profile="minimax"):
     body = _require_request_object(body)
+    provider_profile = _normalize_provider_profile(provider_profile)
     _validate_supported_request_fields(body)
-    _validate_request_scalar_fields(body)
+    _validate_request_scalar_fields(body, provider_profile=provider_profile)
     stream = _normalize_stream(body.get("stream"))
     instructions = _normalize_instructions(body.get("instructions"))
     if body.get("background"):
@@ -1478,13 +1600,13 @@ def translate_responses_request(body):
     if max_output_tokens is not None:
         result["max_tokens"] = max_output_tokens
 
-    temperature = _normalize_temperature(body.get("temperature"))
+    temperature = _normalize_temperature(body.get("temperature"), provider_profile=provider_profile)
     if temperature is not None:
         result["temperature"] = temperature
     top_p = _normalize_top_p(body.get("top_p"))
     if top_p is not None:
         result["top_p"] = top_p
-    stop_sequences = _normalize_stop(body.get("stop"))
+    stop_sequences = _normalize_stop(body.get("stop"), provider_profile=provider_profile)
     if stop_sequences is not None:
         result["stop_sequences"] = stop_sequences
     thinking = _thinking_from_reasoning(body, result.get("max_tokens"))
@@ -1617,7 +1739,7 @@ def translate_responses_request(body):
             if role in {"developer", "system"}:
                 flush_assistant()
                 flush_tool_results()
-                developer_blocks = _translate_content_blocks(item.get("content", []))
+                developer_blocks = _translate_content_blocks(item.get("content", []), allow_message_media=True)
                 if any(block.get("type") != "text" for block in developer_blocks):
                     raise UnsupportedFeatureError(
                         "Unsupported Responses API feature: developer messages only support text content"
@@ -1629,7 +1751,11 @@ def translate_responses_request(body):
             if role == "user":
                 flush_assistant()
                 flush_tool_results()
-            translated_content = _translate_content_blocks(item.get("content", []))
+            allow_message_media = role == "user" and _provider_supports_message_media(provider_profile)
+            translated_content = _translate_content_blocks(
+                item.get("content", []),
+                allow_message_media=allow_message_media,
+            )
             if role == "assistant":
                 flush_tool_results()
                 if current_assistant_blocks and not _assistant_blocks_have_open_tool_use(current_assistant_blocks):
@@ -1717,12 +1843,7 @@ def translate_responses_request(body):
             flush_tool_results()
             if current_assistant_blocks and not _assistant_blocks_have_open_tool_use(current_assistant_blocks):
                 flush_assistant()
-            current_assistant_blocks.append(
-                {
-                    "type": "thinking",
-                    "thinking": _reasoning_input_text(item),
-                }
-            )
+            current_assistant_blocks.append(_reasoning_input_block(item))
             continue
 
         if item_type == "item_reference":
@@ -1894,6 +2015,8 @@ class ResponsesEventTranslator:
         self.commentary_index = None
         self.final_message_index = None
         self.tool_output_indexes = {}
+        self.content_block_types = {}
+        self.reasoning_meta = {}
 
     def _include_obfuscation(self):
         stream_options = self.response_context.get("stream_options") or {}
@@ -2367,13 +2490,20 @@ class ResponsesEventTranslator:
         if event_type == "content_block_start":
             index = event.get("index", 0)
             block = event.get("content_block", {})
+            self.content_block_types[index] = block.get("type")
             if block.get("type") == "text":
                 events.extend(self._ensure_text_started(index))
             elif block.get("type") == "thinking":
                 reasoning_index = self._reasoning_output_index()
                 commentary_index = self._commentary_output_index()
+                meta = {"type": block.get("type", "thinking")}
+                for field_name in ("signature", "data"):
+                    field_value = block.get(field_name)
+                    if isinstance(field_value, str) and field_value:
+                        meta[field_name] = field_value
+                self.reasoning_meta[reasoning_index] = meta
                 encrypted_content = _reasoning_encrypted_content(
-                    block,
+                    meta,
                     response_context=self.response_context,
                     content_text=block.get("thinking") or block.get("text") or "",
                 )
@@ -2443,6 +2573,14 @@ class ResponsesEventTranslator:
                 commentary_index = self._commentary_output_index()
                 self.reasoning_buffers[reasoning_index] = self.reasoning_buffers.get(reasoning_index, "") + text
                 self.commentary_buffers[commentary_index] = self.commentary_buffers.get(commentary_index, "") + text
+                meta = self.reasoning_meta.setdefault(reasoning_index, {"type": "thinking"})
+                encrypted_content = _reasoning_encrypted_content(
+                    meta,
+                    response_context=self.response_context,
+                    content_text=self.reasoning_buffers[reasoning_index],
+                )
+                if encrypted_content is not None:
+                    self.reasoning_encrypted[reasoning_index] = encrypted_content
                 events.extend(self._ensure_reasoning_started(reasoning_index))
                 events.extend(self._ensure_commentary_started(commentary_index))
                 summary_text = _reasoning_summary_text(
@@ -2481,6 +2619,20 @@ class ResponsesEventTranslator:
                         )
                     )
                 return events
+            if delta_type == "signature_delta":
+                reasoning_index = self._reasoning_output_index()
+                signature = delta.get("signature")
+                if isinstance(signature, str) and signature:
+                    meta = self.reasoning_meta.setdefault(reasoning_index, {"type": "thinking"})
+                    meta["signature"] = signature
+                    encrypted_content = _reasoning_encrypted_content(
+                        meta,
+                        response_context=self.response_context,
+                        content_text=self.reasoning_buffers.get(reasoning_index, ""),
+                    )
+                    if encrypted_content is not None:
+                        self.reasoning_encrypted[reasoning_index] = encrypted_content
+                return events
             if delta_type == "input_json_delta":
                 if index in self.ignored_tool_indexes or index not in self.tool_calls:
                     return events
@@ -2511,6 +2663,16 @@ class ResponsesEventTranslator:
             index = event.get("index", 0)
             if index in self.ignored_tool_indexes:
                 return events
+            if self.content_block_types.get(index) == "thinking" and self.reasoning_index is not None:
+                reasoning_index = self._reasoning_output_index()
+                meta = self.reasoning_meta.get(reasoning_index, {"type": "thinking"})
+                encrypted_content = _reasoning_encrypted_content(
+                    meta,
+                    response_context=self.response_context,
+                    content_text=self.reasoning_buffers.get(reasoning_index, ""),
+                )
+                if encrypted_content is not None:
+                    self.reasoning_encrypted[reasoning_index] = encrypted_content
             if index in self.tool_calls:
                 events.extend(self._close_tool(index))
             return events

@@ -64,8 +64,12 @@ def create_app(settings_override=None, upstream_client=None):
             return _error_response(400, "Invalid JSON request body")
         _write_last_request(body, settings.request_log_path)
         try:
-            translated = translate_responses_request(body)
-            response_context = build_response_context(body, model=translated.get("model"))
+            translated = translate_responses_request(body, provider_profile=settings.upstream_compat_profile)
+            response_context = build_response_context(
+                body,
+                model=translated.get("model"),
+                provider_profile=settings.upstream_compat_profile,
+            )
         except UnsupportedFeatureError as exc:
             return _error_response(400, str(exc), "unsupported_feature")
 

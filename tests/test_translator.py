@@ -1403,7 +1403,7 @@ def test_translate_anthropic_response_omits_nonstandard_incomplete_reason_values
     assert translated["incomplete_details"] in (None, {})
 
 
-def test_translate_anthropic_response_omits_reasoning_encrypted_content_even_if_requested():
+def test_translate_anthropic_response_includes_reasoning_encrypted_content_when_signature_available():
     body = {
         "id": "msg_reasoning",
         "content": [
@@ -1421,7 +1421,7 @@ def test_translate_anthropic_response_omits_reasoning_encrypted_content_even_if_
     reasoning_item = translated["output"][0]
 
     assert reasoning_item["type"] == "reasoning"
-    assert "encrypted_content" not in reasoning_item
+    assert reasoning_item["encrypted_content"].startswith("a2r_reasoning_v1:")
 
 
 def test_translate_anthropic_response_omits_reasoning_encrypted_content_when_upstream_missing():
@@ -1558,16 +1558,17 @@ def test_translate_responses_request_does_not_default_max_output_tokens():
 
 
 def test_translate_responses_request_rejects_reasoning_encrypted_content_include():
-    with pytest.raises(UnsupportedFeatureError, match="include"):
-        translate_responses_request(
-            {
-                "model": "codex-MiniMax-M2.7",
-                "input": "hello",
-                "include": ["reasoning.encrypted_content"],
-                "prompt_cache_key": "cache-key-123",
-                "parallel_tool_calls": False,
-            }
-        )
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "include": ["reasoning.encrypted_content"],
+            "prompt_cache_key": "cache-key-123",
+            "parallel_tool_calls": False,
+        }
+    )
+
+    assert translated["model"] == "codex-MiniMax-M2.7"
 
 
 @pytest.mark.parametrize("item_type", ["function_call", "custom_tool_call", "apply_patch_call", "shell_call"])
@@ -1848,7 +1849,7 @@ def test_translate_responses_request_rejects_unsupported_tool_output_content_blo
         )
 
 
-def test_translate_responses_request_supports_multimodal_user_content():
+def test_translate_responses_request_supports_multimodal_user_content_with_anthropic_profile():
     request_body = {
         "model": "codex-MiniMax-M2.7",
         "input": [
@@ -1869,7 +1870,7 @@ def test_translate_responses_request_supports_multimodal_user_content():
         ],
     }
 
-    translated = translate_responses_request(request_body)
+    translated = translate_responses_request(request_body, provider_profile="anthropic")
 
     assert translated["messages"] == [
         {
@@ -1885,6 +1886,25 @@ def test_translate_responses_request_supports_multimodal_user_content():
             ],
         }
     ]
+
+
+def test_translate_responses_request_rejects_multimodal_user_content_for_minimax_profile():
+    with pytest.raises(UnsupportedFeatureError, match="input_image is not supported"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "see attached"},
+                            {"type": "input_image", "image_url": "https://example.com/cat.png"},
+                        ],
+                    }
+                ],
+            }
+        )
 
 
 def test_translate_responses_request_rejects_unsupported_image_detail():
@@ -1905,7 +1925,8 @@ def test_translate_responses_request_rejects_unsupported_image_detail():
                         ],
                     }
                 ],
-            }
+            },
+            provider_profile="anthropic",
         )
 
 
@@ -1921,7 +1942,8 @@ def test_translate_responses_request_rejects_input_image_file_id():
                         "content": [{"type": "input_image", "file_id": "file_123"}],
                     }
                 ],
-            }
+            },
+            provider_profile="anthropic",
         )
 
 
@@ -1937,7 +1959,8 @@ def test_translate_responses_request_rejects_invalid_base64_input_image():
                         "content": [{"type": "input_image", "image_url": "data:image/png;base64,***"}],
                     }
                 ],
-            }
+            },
+            provider_profile="anthropic",
         )
 
 
@@ -1959,7 +1982,8 @@ def test_translate_responses_request_rejects_invalid_base64_input_file():
                         ],
                     }
                 ],
-            }
+            },
+            provider_profile="anthropic",
         )
 
 
@@ -2020,7 +2044,7 @@ def test_translate_responses_request_supports_inline_text_file_content():
         ],
     }
 
-    translated = translate_responses_request(request_body)
+    translated = translate_responses_request(request_body, provider_profile="anthropic")
 
     assert translated["messages"] == [
         {
@@ -2051,7 +2075,7 @@ def test_translate_responses_request_supports_inline_json_file_content():
         ],
     }
 
-    translated = translate_responses_request(request_body)
+    translated = translate_responses_request(request_body, provider_profile="anthropic")
 
     assert translated["messages"] == [
         {
@@ -2081,7 +2105,8 @@ def test_translate_responses_request_rejects_non_utf8_inline_text_file_content()
                         ],
                     }
                 ],
-            }
+            },
+            provider_profile="anthropic",
         )
 
 
@@ -2103,7 +2128,7 @@ def test_translate_responses_request_supports_text_format_and_sampling_controls(
         "tool_choice": "none",
     }
 
-    translated = translate_responses_request(request_body)
+    translated = translate_responses_request(request_body, provider_profile="anthropic")
 
     assert translated["temperature"] == 0.2
     assert translated["top_p"] == 0.9
@@ -2112,6 +2137,17 @@ def test_translate_responses_request_supports_text_format_and_sampling_controls(
     assert "Base system" in translated["system"]
     assert "strictly follows this JSON schema" in translated["system"]
     assert '"city"' in translated["system"]
+
+
+def test_translate_responses_request_rejects_stop_for_minimax_profile():
+    with pytest.raises(UnsupportedFeatureError, match="stop"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "stop": ["DONE"],
+            }
+        )
 
 
 def test_translate_responses_request_rejects_previous_response_id():
@@ -2470,7 +2506,9 @@ def test_translate_responses_request_rejects_allowed_tools_with_unknown_tool_nam
     [
         ("max_output_tokens", 0, "max_output_tokens"),
         ("max_output_tokens", "100", "max_output_tokens"),
+        ("temperature", 0, "temperature"),
         ("temperature", -0.1, "temperature"),
+        ("temperature", 1.1, "temperature"),
         ("temperature", 2.5, "temperature"),
         ("temperature", "warm", "temperature"),
         ("top_p", -0.1, "top_p"),
@@ -3147,19 +3185,31 @@ def test_translate_responses_request_rejects_invalid_reasoning_effort():
 
 
 def test_translate_responses_request_rejects_reasoning_input_items_with_encrypted_content():
-    with pytest.raises(UnsupportedFeatureError, match="reasoning.encrypted_content"):
-        translate_responses_request(
-            {
-                "model": "codex-MiniMax-M2.7",
-                "input": [
-                    {
-                        "type": "reasoning",
-                        "summary": [{"type": "summary_text", "text": "Plan"}],
-                        "encrypted_content": "proxy_reasoning_v1:SW5zcGVjdCBmaWxlcyBiZWZvcmUgZWRpdGluZy4=",
-                    }
-                ],
-            }
-        )
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": [
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "Plan"}],
+                    "encrypted_content": "a2r_reasoning_v1:eyJ0eXBlIjoidGhpbmtpbmciLCJ0aGlua2luZyI6IlBsYW4iLCJzaWduYXR1cmUiOiJzaWdfMTIzIn0=",
+                }
+            ],
+        }
+    )
+
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "thinking",
+                    "thinking": "Plan",
+                    "signature": "sig_123",
+                }
+            ],
+        }
+    ]
 
 
 def test_translate_responses_request_rejects_non_text_developer_content():
