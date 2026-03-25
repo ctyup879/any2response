@@ -1954,8 +1954,31 @@ def test_translate_responses_request_rejects_unsupported_image_detail():
         )
 
 
-def test_translate_responses_request_rejects_input_image_file_id():
-    with pytest.raises(UnsupportedFeatureError, match="input_image.file_id"):
+def test_translate_responses_request_supports_input_image_file_id_for_anthropic_profile():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_image", "file_id": "file_img_123"}],
+                }
+            ],
+        },
+        provider_profile="anthropic",
+    )
+
+    assert translated["messages"] == [
+        {
+            "role": "user",
+            "content": [{"type": "image", "source": {"type": "file", "file_id": "file_img_123"}}],
+        }
+    ]
+
+
+def test_translate_responses_request_rejects_input_image_file_id_for_minimax_profile():
+    with pytest.raises(UnsupportedFeatureError, match="input_image is not supported by the upstream capability profile"):
         translate_responses_request(
             {
                 "model": "codex-MiniMax-M2.7",
@@ -1967,7 +1990,7 @@ def test_translate_responses_request_rejects_input_image_file_id():
                     }
                 ],
             },
-            provider_profile="anthropic",
+            provider_profile="minimax",
         )
 
 
@@ -2008,6 +2031,58 @@ def test_translate_responses_request_rejects_invalid_base64_input_file():
                 ],
             },
             provider_profile="anthropic",
+        )
+
+
+def test_translate_responses_request_supports_input_file_file_id_for_anthropic_profile():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_file",
+                            "file_id": "file_doc_123",
+                            "filename": "guide.pdf",
+                        }
+                    ],
+                }
+            ],
+        },
+        provider_profile="anthropic",
+    )
+
+    assert translated["messages"] == [
+        {
+            "role": "user",
+            "content": [{"type": "document", "source": {"type": "file", "file_id": "file_doc_123"}}],
+        }
+    ]
+
+
+def test_translate_responses_request_rejects_input_file_file_id_for_minimax_profile():
+    with pytest.raises(UnsupportedFeatureError, match="input_file is not supported by the upstream capability profile"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_file",
+                                "file_id": "file_doc_123",
+                                "filename": "guide.pdf",
+                            }
+                        ],
+                    }
+                ],
+            },
+            provider_profile="minimax",
         )
 
 
@@ -3008,7 +3083,6 @@ def test_translate_responses_request_supports_custom_tool_choice_shape():
 @pytest.mark.parametrize(
     "tool_choice",
     [
-        {"type": "mcp", "server_label": "deepwiki", "name": "search"},
         {"type": "file_search"},
         {"type": "web_search_preview"},
         {"type": "computer_use_preview"},
@@ -3025,6 +3099,145 @@ def test_translate_responses_request_rejects_unsupported_tool_choice_type(tool_c
                 "tool_choice": tool_choice,
             }
         )
+
+
+def test_translate_responses_request_supports_mcp_tool_definition_for_anthropic_profile():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "tools": [
+                {
+                    "type": "mcp",
+                    "server_label": "deepwiki",
+                    "server_url": "https://mcp.deepwiki.com/mcp",
+                    "authorization": "oauth-token",
+                    "allowed_tools": ["ask_question", "read_wiki_structure"],
+                    "require_approval": "never",
+                }
+            ],
+        },
+        provider_profile="anthropic",
+    )
+
+    assert translated["mcp_servers"] == [
+        {
+            "type": "url",
+            "name": "deepwiki",
+            "url": "https://mcp.deepwiki.com/mcp",
+            "authorization_token": "oauth-token",
+        }
+    ]
+    assert translated["tools"] == [
+        {
+            "type": "mcp_toolset",
+            "mcp_server_name": "deepwiki",
+            "default_config": {"enabled": False},
+            "configs": {
+                "ask_question": {"enabled": True},
+                "read_wiki_structure": {"enabled": True},
+            },
+        }
+    ]
+
+
+def test_translate_responses_request_supports_mcp_tool_choice_for_anthropic_profile():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "tools": [
+                {
+                    "type": "mcp",
+                    "server_label": "deepwiki",
+                    "server_url": "https://mcp.deepwiki.com/mcp",
+                    "allowed_tools": ["ask_question"],
+                    "require_approval": "never",
+                }
+            ],
+            "tool_choice": {"type": "mcp", "server_label": "deepwiki", "name": "ask_question"},
+        },
+        provider_profile="anthropic",
+    )
+
+    assert translated["tool_choice"] == {"type": "tool", "name": "ask_question"}
+
+
+def test_translate_responses_request_supports_mcp_call_input_item_replay():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": [
+                {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]},
+                {
+                    "type": "mcp_call",
+                    "id": "mcptoolu_123",
+                    "name": "ask_question",
+                    "server_label": "deepwiki",
+                    "arguments": "{\"repoName\":\"modelcontextprotocol/modelcontextprotocol\"}",
+                    "output": "Supported transports include Streamable HTTP and SSE.",
+                    "status": "completed",
+                },
+            ],
+        },
+        provider_profile="anthropic",
+    )
+
+    assert translated["messages"][1] == {
+        "role": "assistant",
+        "content": [
+            {
+                "type": "mcp_tool_use",
+                "id": "mcptoolu_123",
+                "name": "ask_question",
+                "server_name": "deepwiki",
+                "input": {"repoName": "modelcontextprotocol/modelcontextprotocol"},
+            },
+            {
+                "type": "mcp_tool_result",
+                "tool_use_id": "mcptoolu_123",
+                "content": [{"type": "text", "text": "Supported transports include Streamable HTTP and SSE."}],
+            },
+        ],
+    }
+
+
+def test_translate_anthropic_response_supports_mcp_tool_use_and_result():
+    translated = translate_anthropic_response(
+        {
+            "id": "msg_mcp",
+            "content": [
+                {
+                    "type": "mcp_tool_use",
+                    "id": "mcptoolu_123",
+                    "name": "ask_question",
+                    "server_name": "deepwiki",
+                    "input": {"repoName": "modelcontextprotocol/modelcontextprotocol"},
+                },
+                {
+                    "type": "mcp_tool_result",
+                    "tool_use_id": "mcptoolu_123",
+                    "is_error": False,
+                    "content": [{"type": "text", "text": "Supported transports include Streamable HTTP and SSE."}],
+                },
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 11, "output_tokens": 7},
+        },
+        "claude-sonnet-4-20250514",
+    )
+
+    assert translated["output"] == [
+        {
+            "id": "mcptoolu_123",
+            "type": "mcp_call",
+            "name": "ask_question",
+            "server_label": "deepwiki",
+            "arguments": "{\"repoName\": \"modelcontextprotocol/modelcontextprotocol\"}",
+            "output": "Supported transports include Streamable HTTP and SSE.",
+            "status": "completed",
+        }
+    ]
 
 
 @pytest.mark.parametrize(

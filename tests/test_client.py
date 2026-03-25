@@ -1,4 +1,6 @@
-from app.client import parse_sse_events, parse_upstream_error
+from types import SimpleNamespace
+
+from app.client import MiniMaxClient, parse_sse_events, parse_upstream_error
 
 
 def test_parse_sse_events_supports_multiline_data_and_event_headers():
@@ -35,3 +37,34 @@ def test_parse_upstream_error_extracts_nested_message():
     message = parse_upstream_error(body)
 
     assert message == "unknown error (1000)"
+
+
+def test_minimax_client_adds_files_and_mcp_beta_headers_when_payload_requires_them():
+    client = MiniMaxClient(
+        SimpleNamespace(
+            minimax_api_key="minimax-secret",
+            anthropic_version="2023-06-01",
+            anthropic_beta="claude-code-20250219,interleaved-thinking-2025-05-14",
+        )
+    )
+
+    headers = client._headers(
+        {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"type": "image", "source": {"type": "file", "file_id": "file_img_123"}}],
+                }
+            ],
+            "mcp_servers": [{"type": "url", "name": "deepwiki", "url": "https://mcp.deepwiki.com/mcp"}],
+        }
+    )
+
+    assert headers["Anthropic-Beta"] == ",".join(
+        [
+            "claude-code-20250219",
+            "interleaved-thinking-2025-05-14",
+            "files-api-2025-04-14",
+            "mcp-client-2025-11-20",
+        ]
+    )

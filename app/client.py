@@ -3,6 +3,10 @@ import json
 import httpx
 
 
+FILES_API_BETA = "files-api-2025-04-14"
+MCP_CLIENT_BETA = "mcp-client-2025-11-20"
+
+
 class UpstreamHTTPError(RuntimeError):
     def __init__(self, status_code, message):
         super().__init__(message)
@@ -69,13 +73,22 @@ class MiniMaxClient:
     def __init__(self, settings):
         self.settings = settings
 
-    def _headers(self):
+    def _headers(self, payload=None):
+        betas = []
+        raw_betas = getattr(self.settings, "anthropic_beta", "")
+        if isinstance(raw_betas, str):
+            betas.extend(beta.strip() for beta in raw_betas.split(",") if beta.strip())
+        payload = payload or {}
+        if _payload_uses_file_sources(payload) and FILES_API_BETA not in betas:
+            betas.append(FILES_API_BETA)
+        if payload.get("mcp_servers") and MCP_CLIENT_BETA not in betas:
+            betas.append(MCP_CLIENT_BETA)
         return {
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
             "x-api-key": self.settings.minimax_api_key,
             "Anthropic-Version": self.settings.anthropic_version,
-            "Anthropic-Beta": self.settings.anthropic_beta,
+            "Anthropic-Beta": ",".join(betas),
         }
 
     async def create_message(self, payload):
@@ -84,7 +97,7 @@ class MiniMaxClient:
         async with httpx.AsyncClient(timeout=self.settings.request_timeout) as client:
             response = await client.post(
                 self.settings.upstream_base_url,
-                headers=self._headers(),
+                headers=self._headers(request_payload),
                 json=request_payload,
             )
         if response.status_code >= 400:
@@ -98,7 +111,7 @@ class MiniMaxClient:
             async with client.stream(
                 "POST",
                 self.settings.upstream_base_url,
-                headers=self._headers(),
+                headers=self._headers(request_payload),
                 json=request_payload,
             ) as response:
                 if response.status_code >= 400:
@@ -117,3 +130,18 @@ class MiniMaxClient:
                 if buffered_lines:
                     for event in parse_sse_events(buffered_lines):
                         yield event
+
+
+def _payload_uses_file_sources(payload):
+    if not isinstance(payload, dict):
+        return False
+    for message in payload.get("messages", []):
+        if not isinstance(message, dict):
+            continue
+        for block in message.get("content", []):
+            if not isinstance(block, dict):
+                continue
+            source = block.get("source")
+            if isinstance(source, dict) and source.get("type") == "file" and source.get("file_id"):
+                return True
+    return False

@@ -328,6 +328,67 @@ def test_translate_anthropic_redacted_thinking_block_emits_reasoning_without_emp
     assert message_item["phase"] == "final_answer"
 
 
+def test_translate_anthropic_mcp_tool_use_and_result_streams_as_mcp_call():
+    translator = ResponsesEventTranslator(model="claude-sonnet-4-20250514")
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_mcp"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {
+                "type": "mcp_tool_use",
+                "id": "mcptoolu_123",
+                "name": "ask_question",
+                "server_name": "deepwiki",
+                "input": {"repoName": "modelcontextprotocol/modelcontextprotocol"},
+            },
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "input_json_delta",
+                "partial_json": "{\"repoName\":\"modelcontextprotocol/modelcontextprotocol\"}",
+            },
+        },
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "mcp_tool_result",
+                "tool_use_id": "mcptoolu_123",
+                "content": [{"type": "text", "text": "Supported transports include Streamable HTTP and SSE."}],
+            },
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 12, "output_tokens": 8}},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    event_names = [event["event"] for event in events]
+    assert "response.mcp_call.in_progress" in event_names
+    assert "response.mcp_call_arguments.delta" in event_names
+    assert "response.mcp_call_arguments.done" in event_names
+    assert "response.mcp_call.completed" in event_names
+
+    completed_event = next(event for event in events if event["event"] == "response.mcp_call.completed")
+    assert completed_event["data"]["item"] == {
+        "id": "mcptoolu_123",
+        "type": "mcp_call",
+        "name": "ask_question",
+        "server_label": "deepwiki",
+        "arguments": "{\"repoName\":\"modelcontextprotocol/modelcontextprotocol\"}",
+        "output": "Supported transports include Streamable HTTP and SSE.",
+        "status": "completed",
+    }
+
+
 def test_translate_anthropic_thinking_block_omits_proxy_encrypted_content_when_requested_without_upstream_value():
     translator = ResponsesEventTranslator(
         response_context={"include": ["reasoning.encrypted_content"]},

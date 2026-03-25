@@ -33,17 +33,17 @@ IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES = {
     "image_generation",
 }
 
-SUPPORTED_LOCAL_TOOL_TYPES = {None, "function", "custom", "apply_patch", "shell"}
+SUPPORTED_RESPONSES_TOOL_TYPES = {None, "function", "custom", "apply_patch", "shell", "mcp"}
 SUPPORTED_PROVIDER_PROFILES = {"minimax", "anthropic", "generic"}
 SUPPORTED_INCLUDE_VALUES = {"reasoning.encrypted_content"}
 REASONING_BRIDGE_PREFIX = "a2r_reasoning_v1:"
 
 
-def _has_supported_local_tool(tools):
+def _has_supported_translatable_tool(tools):
     for tool in tools or []:
         if not isinstance(tool, dict):
             continue
-        if tool.get("type") in SUPPORTED_LOCAL_TOOL_TYPES:
+        if tool.get("type") in SUPPORTED_RESPONSES_TOOL_TYPES:
             return True
     return False
 
@@ -119,6 +119,14 @@ def _provider_supports_stop_sequences(provider_profile):
     return _normalize_provider_profile(provider_profile) != "minimax"
 
 
+def _provider_supports_files_api(provider_profile):
+    return _normalize_provider_profile(provider_profile) == "anthropic"
+
+
+def _provider_supports_mcp(provider_profile):
+    return _normalize_provider_profile(provider_profile) == "anthropic"
+
+
 def _guess_media_type(filename_or_url):
     media_type, _ = mimetypes.guess_type(filename_or_url or "")
     return media_type or "application/octet-stream"
@@ -167,9 +175,14 @@ def _decode_data_url_text(parsed):
         raise UnsupportedFeatureError("Unsupported input_file source") from exc
 
 
-def _translate_image_block(item):
+def _translate_image_block(item, provider_profile="minimax"):
     if item.get("file_id"):
-        raise UnsupportedFeatureError("Unsupported Responses API feature: input_image.file_id is not supported")
+        if not _provider_supports_files_api(provider_profile):
+            raise UnsupportedFeatureError("Unsupported Responses API feature: input_image.file_id is not supported")
+        file_id = item.get("file_id")
+        if not isinstance(file_id, str) or not file_id.strip():
+            raise UnsupportedFeatureError("Unsupported Responses API feature: input_image.file_id is not supported")
+        return {"type": "image", "source": {"type": "file", "file_id": file_id.strip()}}
     image_url = item.get("image_url", "")
     if isinstance(image_url, dict):
         image_url = image_url.get("url", "")
@@ -482,8 +495,87 @@ def _normalize_shell_environment(environment):
     raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
 
 
-def _translate_file_block(item):
+def _normalize_mcp_server_label(value):
+    if not isinstance(value, str) or not value.strip():
+        raise UnsupportedFeatureError("Unsupported Responses API feature: mcp.server_label is not supported")
+    return value.strip()
+
+
+def _normalize_mcp_server_url(value):
+    if not isinstance(value, str) or not value.startswith(("https://", "http://")):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: mcp.server_url is not supported")
+    return value
+
+
+def _normalize_mcp_authorization(value):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise UnsupportedFeatureError("Unsupported Responses API feature: mcp.authorization is not supported")
+    return value.strip()
+
+
+def _normalize_mcp_allowed_tools(value):
+    if value is None:
+        return None
+    raw_names = value
+    if isinstance(value, dict):
+        raw_names = value.get("tool_names")
+    if not isinstance(raw_names, list) or not raw_names:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: mcp.allowed_tools is not supported")
+    normalized = []
+    for item in raw_names:
+        if not isinstance(item, str) or not item.strip():
+            raise UnsupportedFeatureError("Unsupported Responses API feature: mcp.allowed_tools is not supported")
+        name = item.strip()
+        if name not in normalized:
+            normalized.append(name)
+    return normalized
+
+
+def _normalize_mcp_require_approval(value):
+    if value in (None, "never"):
+        return value
+    raise UnsupportedFeatureError("Unsupported Responses API feature: mcp.require_approval is not supported")
+
+
+def _normalize_mcp_tool(tool, provider_profile="minimax"):
+    if not _provider_supports_mcp(provider_profile):
+        raise UnsupportedFeatureError("Unsupported Responses API tool type: mcp")
+    connector_id = tool.get("connector_id")
+    if connector_id is not None:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: mcp.connector_id is not supported")
+    normalized = {
+        "type": "mcp",
+        "server_label": _normalize_mcp_server_label(tool.get("server_label")),
+        "server_url": _normalize_mcp_server_url(tool.get("server_url")),
+    }
+    require_approval = _normalize_mcp_require_approval(tool.get("require_approval"))
+    if require_approval is not None:
+        normalized["require_approval"] = require_approval
+    authorization = _normalize_mcp_authorization(tool.get("authorization"))
+    if authorization is not None:
+        normalized["authorization"] = authorization
+    allowed_tools = _normalize_mcp_allowed_tools(tool.get("allowed_tools"))
+    if allowed_tools is not None:
+        normalized["allowed_tools"] = allowed_tools
+    return normalized
+
+
+def _translate_file_block(item, provider_profile="minimax"):
     if item.get("file_id"):
+        if not _provider_supports_files_api(provider_profile):
+            raise UnsupportedFeatureError("Unsupported Responses API feature: input_file.file_id is not supported")
+        file_id = item.get("file_id")
+        if not isinstance(file_id, str) or not file_id.strip():
+            raise UnsupportedFeatureError("Unsupported Responses API feature: input_file.file_id is not supported")
+        media_type = item.get("mime_type")
+        if media_type is None:
+            media_type = _guess_media_type(item.get("filename") or "")
+        if media_type.startswith("image/"):
+            return {"type": "image", "source": {"type": "file", "file_id": file_id.strip()}}
+        if media_type in {"application/pdf", "text/plain"}:
+            return {"type": "document", "source": {"type": "file", "file_id": file_id.strip()}}
         raise UnsupportedFeatureError("Unsupported Responses API feature: input_file.file_id is not supported")
 
     file_value = item.get("file_data") or item.get("file_url") or ""
@@ -509,7 +601,7 @@ def _translate_file_block(item):
     raise UnsupportedFeatureError(f"Unsupported input_file media type: {media_type}")
 
 
-def _translate_content_blocks(content, allow_message_media=True):
+def _translate_content_blocks(content, allow_message_media=True, provider_profile="minimax"):
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
 
@@ -536,14 +628,14 @@ def _translate_content_blocks(content, allow_message_media=True):
             instruction = _image_detail_instruction(item.get("detail"))
             if instruction:
                 blocks.append({"type": "text", "text": instruction})
-            blocks.append(_translate_image_block(item))
+            blocks.append(_translate_image_block(item, provider_profile=provider_profile))
             continue
         if item_type in {"input_file", "file"}:
             if not allow_message_media:
                 raise UnsupportedFeatureError(
                     "Unsupported Responses API feature: input_file is not supported by the upstream capability profile"
                 )
-            blocks.append(_translate_file_block(item))
+            blocks.append(_translate_file_block(item, provider_profile=provider_profile))
             continue
         if item_type in {"thinking", "redacted_thinking"}:
             block = {"type": item_type}
@@ -679,11 +771,24 @@ def _parse_apply_patch_operation(value):
     raise UnsupportedFeatureError("Unsupported Responses API feature: apply_patch_call.operation is not supported")
 
 
-def _translate_tools(tools):
+def _mcp_toolset_payload(tool):
+    payload = {
+        "type": "mcp_toolset",
+        "mcp_server_name": tool["server_label"],
+    }
+    allowed_tools = tool.get("allowed_tools")
+    if allowed_tools:
+        payload["default_config"] = {"enabled": False}
+        payload["configs"] = {name: {"enabled": True} for name in allowed_tools}
+    return payload
+
+
+def _translate_tools(tools, provider_profile="minimax"):
     if tools is not None and not isinstance(tools, list):
         raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
-    has_supported_local_tool = _has_supported_local_tool(tools)
+    has_supported_local_tool = _has_supported_translatable_tool(tools)
     translated = []
+    mcp_servers = []
     for tool in tools or []:
         if not isinstance(tool, dict):
             raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
@@ -691,10 +796,22 @@ def _translate_tools(tools):
         tool_name = tool.get("name") or tool.get("function", {}).get("name", "")
         if tool_type in IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES and not tool_name and has_supported_local_tool:
             continue
-        if tool_type not in SUPPORTED_LOCAL_TOOL_TYPES:
+        if tool_type not in SUPPORTED_RESPONSES_TOOL_TYPES:
             raise UnsupportedFeatureError(
                 f"Unsupported Responses API tool type: {tool_type}"
             )
+        if tool_type == "mcp":
+            normalized_tool = _normalize_mcp_tool(tool, provider_profile=provider_profile)
+            server = {
+                "type": "url",
+                "name": normalized_tool["server_label"],
+                "url": normalized_tool["server_url"],
+            }
+            if normalized_tool.get("authorization"):
+                server["authorization_token"] = normalized_tool["authorization"]
+            translated.append(_mcp_toolset_payload(normalized_tool))
+            mcp_servers.append(server)
+            continue
         if tool_type in {"apply_patch", "shell"} and not tool_name:
             tool_name = tool_type
         tool_name = _require_named_tool(tool_type, tool_name)
@@ -742,7 +859,26 @@ def _translate_tools(tools):
                 "input_schema": _normalize_function_parameters(tool),
             }
         )
-    return translated
+    return translated, mcp_servers
+
+
+def _known_response_tool_names(tools):
+    names = set()
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        tool_type = tool.get("type")
+        name = tool.get("name") or tool.get("function", {}).get("name", "")
+        if tool_type == "mcp":
+            for allowed_name in tool.get("allowed_tools") or []:
+                if isinstance(allowed_name, str) and allowed_name.strip():
+                    names.add(allowed_name.strip())
+            continue
+        if tool_type in {"apply_patch", "shell"} and not name:
+            name = tool_type
+        if isinstance(name, str) and name.strip():
+            names.add(name.strip())
+    return names
 
 
 def _normalize_include(include):
@@ -797,6 +933,11 @@ def _tool_type_lookup(response_context):
         return lookup
     for tool in response_context.get("tools", []):
         if not isinstance(tool, dict):
+            continue
+        if tool.get("type") == "mcp":
+            for name in tool.get("allowed_tools") or []:
+                if isinstance(name, str) and name.strip():
+                    lookup[name.strip()] = "mcp_call"
             continue
         name = tool.get("name") or tool.get("function", {}).get("name", "")
         if not isinstance(name, str) or not name.strip():
@@ -960,7 +1101,7 @@ def _assistant_message_item_payload(item_id, text, status, phase="final_answer",
 
 
 def _assistant_blocks_have_open_tool_use(blocks):
-    return any(isinstance(block, dict) and block.get("type") == "tool_use" for block in blocks)
+    return any(isinstance(block, dict) and block.get("type") in {"tool_use", "mcp_tool_use"} for block in blocks)
 
 
 def _apply_assistant_phase(content_blocks, phase):
@@ -1007,6 +1148,42 @@ def _tool_item_payload(call_id, name, payload, status, response_context=None):
         return item
     item["name"] = name
     item["arguments"] = payload
+    return item
+
+
+def _mcp_output_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        text_parts = []
+        for part in value:
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str):
+                text_parts.append(part["text"])
+        if text_parts:
+            return "".join(text_parts)
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, dict):
+        if value.get("type") == "text" and isinstance(value.get("text"), str):
+            return value["text"]
+        return json.dumps(value, ensure_ascii=False)
+    return _stringify(value)
+
+
+def _mcp_call_item_payload(item_id, name, server_label, arguments, status, output=None, error=None):
+    item = {
+        "id": item_id,
+        "type": "mcp_call",
+        "name": name,
+        "server_label": server_label,
+        "arguments": arguments,
+        "status": status,
+    }
+    if output is not None:
+        item["output"] = output
+    if error is not None:
+        item["error"] = error
     return item
 
 
@@ -1189,10 +1366,10 @@ def _reasoning_input_block(item):
     }
 
 
-def _normalize_response_tools(tools):
+def _normalize_response_tools(tools, provider_profile="minimax"):
     if tools is not None and not isinstance(tools, list):
         raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
-    has_supported_local_tool = _has_supported_local_tool(tools)
+    has_supported_local_tool = _has_supported_translatable_tool(tools)
     normalized = []
     for tool in tools or []:
         if not isinstance(tool, dict):
@@ -1202,8 +1379,11 @@ def _normalize_response_tools(tools):
         tool_name = normalized_tool.get("name") or normalized_tool.get("function", {}).get("name", "")
         if tool_type in IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES and not tool_name and has_supported_local_tool:
             continue
-        if tool_type not in SUPPORTED_LOCAL_TOOL_TYPES:
+        if tool_type not in SUPPORTED_RESPONSES_TOOL_TYPES:
             raise UnsupportedFeatureError(f"Unsupported Responses API tool type: {tool_type}")
+        if tool_type == "mcp":
+            normalized.append(_normalize_mcp_tool(normalized_tool, provider_profile=provider_profile))
+            continue
         if tool_type in {"apply_patch", "shell"} and not normalized_tool.get("name"):
             normalized_tool["name"] = tool_type
         normalized_tool["name"] = _require_named_tool(tool_type, normalized_tool.get("name") or normalized_tool.get("function", {}).get("name", ""))
@@ -1247,8 +1427,8 @@ def _unwrap_custom_tool_payload(payload):
     return _stringify(payload)
 
 
-def _effective_response_tools(body):
-    tools = _normalize_response_tools(body.get("tools", []))
+def _effective_response_tools(body, provider_profile="minimax"):
+    tools = _normalize_response_tools(body.get("tools", []), provider_profile=provider_profile)
     tool_choice = body.get("tool_choice")
     if not isinstance(tool_choice, dict):
         return tools
@@ -1256,6 +1436,8 @@ def _effective_response_tools(body):
     choice_type = tool_choice.get("type")
     if choice_type == "custom":
         name = tool_choice.get("name")
+        if name is not None:
+            name = _normalize_tool_choice_name(name, "tool_choice.custom")
         if name and all(tool.get("name") != name for tool in tools if isinstance(tool, dict)):
             tools.append({"type": "custom", "name": name, "format": {"type": "text"}})
         return tools
@@ -1263,6 +1445,8 @@ def _effective_response_tools(body):
         name = choice_type
         if all(tool.get("name") != name for tool in tools if isinstance(tool, dict)):
             tools.append({"type": choice_type, "name": name})
+        return tools
+    if choice_type == "mcp":
         return tools
     if choice_type == "tool":
         name = tool_choice.get("name")
@@ -1363,7 +1547,7 @@ def build_response_context(body, model=None, provider_profile="minimax"):
         "user": _normalize_user(body.get("user")),
         "store": body.get("store", False),
         "tool_choice": body.get("tool_choice", "auto"),
-        "tools": _effective_response_tools(body),
+        "tools": _effective_response_tools(body, provider_profile=provider_profile),
         "text": text_config,
         "temperature": _normalize_temperature(body.get("temperature"), provider_profile=provider_profile)
         if body.get("temperature") is not None
@@ -1405,6 +1589,10 @@ def _translate_tool_choice(tool_choice):
         if choice_type == "custom":
             name = _normalize_tool_choice_name(tool_choice.get("name"), "tool_choice.custom")
             return {"type": "tool", "name": name}
+        if choice_type == "mcp":
+            name = _normalize_tool_choice_name(tool_choice.get("name"), "tool_choice.mcp")
+            server_label = _normalize_mcp_server_label(tool_choice.get("server_label"))
+            return {"type": "tool", "name": name, "_mcp_server_label": server_label}
         if choice_type == "apply_patch":
             return {"type": "tool", "name": "apply_patch"}
         if choice_type == "shell":
@@ -1624,17 +1812,35 @@ def translate_responses_request(body, provider_profile="minimax"):
     if text_verbosity_instruction:
         system_segments.append(text_verbosity_instruction)
 
+    response_tools = _effective_response_tools(body, provider_profile=provider_profile)
     allowed_tool_names = _allowed_tool_names(body.get("tool_choice"))
-    tools = _translate_tools(body.get("tools", []))
+    tools, mcp_servers = _translate_tools(response_tools, provider_profile=provider_profile)
     if allowed_tool_names is not None:
-        known_tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
+        known_tool_names = _known_response_tool_names(response_tools)
         missing_names = sorted(name for name in allowed_tool_names if name not in known_tool_names)
         if missing_names:
             raise UnsupportedFeatureError(
                 "Unsupported Responses API feature: tool_choice.allowed_tools references unknown tools"
             )
-        tools = [tool for tool in tools if tool.get("name") in allowed_tool_names]
-        if not tools:
+        filtered_response_tools = []
+        for tool in response_tools:
+            if tool.get("type") == "mcp":
+                tool_names = set(tool.get("allowed_tools") or [])
+                if not tool_names:
+                    continue
+                matched_names = [name for name in tool.get("allowed_tools", []) if name in allowed_tool_names]
+                if not matched_names:
+                    continue
+                narrowed_tool = dict(tool)
+                narrowed_tool["allowed_tools"] = matched_names
+                filtered_response_tools.append(narrowed_tool)
+                continue
+            elif tool.get("name") not in allowed_tool_names:
+                continue
+            filtered_response_tools.append(tool)
+        response_tools = filtered_response_tools
+        tools, mcp_servers = _translate_tools(response_tools, provider_profile=provider_profile)
+        if not tools and not mcp_servers:
             raise UnsupportedFeatureError(
                 "Unsupported Responses API feature: tool_choice.allowed_tools did not match any tools"
             )
@@ -1657,12 +1863,13 @@ def translate_responses_request(body, provider_profile="minimax"):
         and tool_choice_input.get("type") in {"custom", "apply_patch", "shell"}
         and tool_choice
         and tool_choice.get("type") == "tool"
-        and all(tool.get("name") != tool_choice["name"] for tool in tools)
+        and tool_choice["name"] not in _known_response_tool_names(response_tools)
     ):
         choice_type = tool_choice_input.get("type")
         if choice_type == "custom":
-            tools.append(
+            response_tools.append(
                 {
+                    "type": choice_type,
                     "name": tool_choice["name"],
                     "description": "",
                     "input_schema": {
@@ -1674,8 +1881,9 @@ def translate_responses_request(body, provider_profile="minimax"):
                 }
             )
         else:
-            tools.append(
+            response_tools.append(
                 {
+                    "type": choice_type,
                     "name": tool_choice["name"],
                     "description": "",
                     "input_schema": _builtin_tool_input_schema(choice_type),
@@ -1687,25 +1895,50 @@ def translate_responses_request(body, provider_profile="minimax"):
         and tool_choice
         and tool_choice.get("type") == "tool"
         and tool_choice["name"] in {"apply_patch", "shell"}
-        and all(tool.get("name") != tool_choice["name"] for tool in tools)
+        and tool_choice["name"] not in _known_response_tool_names(response_tools)
     ):
-        tools.append(
+        response_tools.append(
             {
+                "type": tool_choice["name"],
                 "name": tool_choice["name"],
                 "description": "",
                 "input_schema": _builtin_tool_input_schema(tool_choice["name"]),
             }
         )
     if (
+        isinstance(tool_choice_input, dict)
+        and tool_choice_input.get("type") == "mcp"
+        and tool_choice
+        and tool_choice.get("type") == "tool"
+    ):
+        target_server = tool_choice.pop("_mcp_server_label", None)
+        matching_tool = None
+        for tool in response_tools:
+            if tool.get("type") != "mcp":
+                continue
+            if tool.get("server_label") != target_server:
+                continue
+            allowed_names = tool.get("allowed_tools") or []
+            if allowed_names and tool_choice["name"] in allowed_names:
+                matching_tool = tool
+                break
+        if matching_tool is None:
+            raise UnsupportedFeatureError(
+                "Unsupported Responses API feature: tool_choice references unknown tools"
+            )
+    if (
         tool_choice
         and tool_choice.get("type") == "tool"
-        and tool_choice["name"] not in {tool.get("name") for tool in tools}
+        and tool_choice["name"] not in _known_response_tool_names(response_tools)
     ):
         raise UnsupportedFeatureError(
             "Unsupported Responses API feature: tool_choice references unknown tools"
         )
+    tools, mcp_servers = _translate_tools(response_tools, provider_profile=provider_profile)
     if tools:
         result["tools"] = tools
+    if mcp_servers:
+        result["mcp_servers"] = mcp_servers
     if tool_choice:
         result["tool_choice"] = tool_choice
 
@@ -1739,7 +1972,11 @@ def translate_responses_request(body, provider_profile="minimax"):
             if role in {"developer", "system"}:
                 flush_assistant()
                 flush_tool_results()
-                developer_blocks = _translate_content_blocks(item.get("content", []), allow_message_media=True)
+                developer_blocks = _translate_content_blocks(
+                    item.get("content", []),
+                    allow_message_media=True,
+                    provider_profile=provider_profile,
+                )
                 if any(block.get("type") != "text" for block in developer_blocks):
                     raise UnsupportedFeatureError(
                         "Unsupported Responses API feature: developer messages only support text content"
@@ -1755,6 +1992,7 @@ def translate_responses_request(body, provider_profile="minimax"):
             translated_content = _translate_content_blocks(
                 item.get("content", []),
                 allow_message_media=allow_message_media,
+                provider_profile=provider_profile,
             )
             if role == "assistant":
                 flush_tool_results()
@@ -1806,6 +2044,53 @@ def translate_responses_request(body, provider_profile="minimax"):
                     "input": tool_input,
                 }
             )
+            continue
+
+        if item_type == "mcp_call":
+            call_id = item.get("id")
+            if not isinstance(call_id, str) or not call_id:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: mcp_call id is required")
+            name = (item.get("name") or "").strip()
+            if not name:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: mcp_call name is required")
+            server_label = item.get("server_label")
+            if not isinstance(server_label, str) or not server_label.strip():
+                raise UnsupportedFeatureError("Unsupported Responses API feature: mcp_call server_label is not supported")
+            status = item.get("status")
+            if status not in {None, "in_progress", "calling", "completed", "failed"}:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: mcp_call status is not supported")
+            flush_tool_results()
+            if current_assistant_blocks and not _assistant_blocks_have_open_tool_use(current_assistant_blocks):
+                flush_assistant()
+            current_assistant_blocks.append(
+                {
+                    "type": "mcp_tool_use",
+                    "id": call_id,
+                    "name": name,
+                    "server_name": server_label.strip(),
+                    "input": _parse_tool_call_arguments(item.get("arguments")),
+                }
+            )
+            result_payload = None
+            is_error = False
+            if item.get("error") is not None:
+                result_payload = item.get("error")
+                is_error = True
+            elif item.get("output") is not None:
+                result_payload = item.get("output")
+            if result_payload is not None or status in {"completed", "failed"}:
+                if isinstance(result_payload, str):
+                    result_content = [{"type": "text", "text": result_payload}]
+                else:
+                    result_content = _translate_tool_result_content(result_payload or "")
+                result_block = {
+                    "type": "mcp_tool_result",
+                    "tool_use_id": call_id,
+                    "content": result_content,
+                }
+                if is_error or status == "failed":
+                    result_block["is_error"] = True
+                current_assistant_blocks.append(result_block)
             continue
 
         if item_type in {
@@ -1897,6 +2182,7 @@ def translate_anthropic_response(body, model, response_context=None):
     final_text_parts = []
     parallel_tool_calls = True if response_context is None else response_context.get("parallel_tool_calls", True)
     tool_call_seen = False
+    mcp_calls = {}
     response_status, incomplete_details = _response_completion_from_stop_reason(body.get("stop_reason"))
     message_status = "completed" if response_status == "completed" else "incomplete"
     reasoning_status = message_status
@@ -1963,6 +2249,37 @@ def translate_anthropic_response(body, model, response_context=None):
                     response_context=response_context,
                 )
             )
+        elif block_type == "mcp_tool_use":
+            call_id = block.get("id")
+            if not isinstance(call_id, str) or not call_id:
+                raise UnsupportedFeatureError("Unsupported Anthropic response block: mcp_tool_use.id is required")
+            name = block.get("name")
+            if not isinstance(name, str) or not name:
+                raise UnsupportedFeatureError("Unsupported Anthropic response block: mcp_tool_use.name is required")
+            server_label = block.get("server_name")
+            if not isinstance(server_label, str) or not server_label:
+                raise UnsupportedFeatureError("Unsupported Anthropic response block: mcp_tool_use.server_name is required")
+            item = _mcp_call_item_payload(
+                call_id,
+                name,
+                server_label,
+                json.dumps(block.get("input", {}), ensure_ascii=False),
+                "calling",
+            )
+            mcp_calls[call_id] = item
+            output.append(item)
+        elif block_type == "mcp_tool_result":
+            call_id = block.get("tool_use_id")
+            if not isinstance(call_id, str) or not call_id or call_id not in mcp_calls:
+                raise UnsupportedFeatureError("Unsupported Anthropic response block: orphan mcp_tool_result is not supported")
+            item = mcp_calls[call_id]
+            content_text = _mcp_output_text(block.get("content"))
+            if block.get("is_error") is True:
+                item["error"] = content_text
+                item["status"] = "failed"
+            else:
+                item["output"] = content_text
+                item["status"] = "completed"
 
     response = {
         "id": response_id,
@@ -2008,6 +2325,12 @@ class ResponsesEventTranslator:
         self.tool_args = {}
         self.tool_seed_args = {}
         self.tool_done = set()
+        self.mcp_calls = {}
+        self.mcp_call_ids = {}
+        self.mcp_args = {}
+        self.mcp_seed_args = {}
+        self.mcp_done = set()
+        self.mcp_result_indexes = {}
         self.ignored_tool_indexes = set()
         self.usage = {}
         self.stop_reason = None
@@ -2148,6 +2471,23 @@ class ResponsesEventTranslator:
                         args,
                         "completed" if index in self.tool_done else "in_progress",
                         response_context=self.response_context,
+                    ),
+                )
+            )
+        for index in sorted(self.mcp_calls):
+            call = self.mcp_calls[index]
+            args = self.mcp_args.get(index, "") or self.mcp_seed_args.get(index, "{}")
+            items.append(
+                (
+                    call["output_index"],
+                    _mcp_call_item_payload(
+                        call["call_id"],
+                        call["name"],
+                        call["server_label"],
+                        args,
+                        call["status"] if index in self.mcp_done else "calling",
+                        output=call.get("output"),
+                        error=call.get("error"),
                     ),
                 )
             )
@@ -2457,6 +2797,40 @@ class ResponsesEventTranslator:
             ),
         ]
 
+    def _close_mcp_call(self, index):
+        if index not in self.mcp_calls or index in self.mcp_done:
+            return []
+        self.mcp_done.add(index)
+        call = self.mcp_calls[index]
+        args = self.mcp_args.get(index, "") or self.mcp_seed_args.get(index, "{}")
+        item = _mcp_call_item_payload(
+            call["call_id"],
+            call["name"],
+            call["server_label"],
+            args,
+            call["status"],
+            output=call.get("output"),
+            error=call.get("error"),
+        )
+        return [
+            self._emit(
+                "response.mcp_call.completed",
+                {
+                    "type": "response.mcp_call.completed",
+                    "output_index": call["output_index"],
+                    "item": item,
+                },
+            ),
+            self._emit(
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": call["output_index"],
+                    "item": item,
+                },
+            ),
+        ]
+
     def _emit_completed(self):
         if self.completed:
             return []
@@ -2548,6 +2922,64 @@ class ResponsesEventTranslator:
                         },
                     )
                 )
+            elif block.get("type") == "mcp_tool_use":
+                call_id = block.get("id")
+                if not isinstance(call_id, str) or not call_id:
+                    raise UnsupportedFeatureError("Unsupported Anthropic response block: mcp_tool_use.id is required")
+                name = block.get("name")
+                if not isinstance(name, str) or not name:
+                    raise UnsupportedFeatureError("Unsupported Anthropic response block: mcp_tool_use.name is required")
+                server_label = block.get("server_name")
+                if not isinstance(server_label, str) or not server_label:
+                    raise UnsupportedFeatureError(
+                        "Unsupported Anthropic response block: mcp_tool_use.server_name is required"
+                    )
+                output_index = self._tool_output_index(index)
+                self.mcp_calls[index] = {
+                    "call_id": call_id,
+                    "name": name,
+                    "server_label": server_label,
+                    "output_index": output_index,
+                    "status": "calling",
+                }
+                self.mcp_call_ids[call_id] = index
+                self.mcp_args[index] = ""
+                self.mcp_seed_args[index] = json.dumps(block.get("input", {}), ensure_ascii=False)
+                item = _mcp_call_item_payload(call_id, name, server_label, "", "calling")
+                events.append(
+                    self._emit(
+                        "response.output_item.added",
+                        {
+                            "type": "response.output_item.added",
+                            "output_index": output_index,
+                            "item": item,
+                        },
+                    )
+                )
+                events.append(
+                    self._emit(
+                        "response.mcp_call.in_progress",
+                        {
+                            "type": "response.mcp_call.in_progress",
+                            "output_index": output_index,
+                            "item": item,
+                        },
+                    )
+                )
+            elif block.get("type") == "mcp_tool_result":
+                call_id = block.get("tool_use_id")
+                if not isinstance(call_id, str) or not call_id or call_id not in self.mcp_call_ids:
+                    raise UnsupportedFeatureError("Unsupported Anthropic response block: orphan mcp_tool_result is not supported")
+                call_index = self.mcp_call_ids[call_id]
+                self.mcp_result_indexes[index] = call_index
+                call = self.mcp_calls[call_index]
+                content_text = _mcp_output_text(block.get("content"))
+                if block.get("is_error") is True:
+                    call["error"] = content_text
+                    call["status"] = "failed"
+                else:
+                    call["output"] = content_text
+                    call["status"] = "completed"
             return events
 
         if event_type == "content_block_delta":
@@ -2640,6 +3072,24 @@ class ResponsesEventTranslator:
                         self.reasoning_encrypted[reasoning_index] = encrypted_content
                 return events
             if delta_type == "input_json_delta":
+                if index in self.mcp_calls:
+                    partial = delta.get("partial_json", "")
+                    self.mcp_args[index] = self.mcp_args.get(index, "") + partial
+                    call = self.mcp_calls[index]
+                    events.append(
+                        self._emit(
+                            "response.mcp_call_arguments.delta",
+                            self._delta_payload(
+                                {
+                                    "type": "response.mcp_call_arguments.delta",
+                                    "item_id": call["call_id"],
+                                    "output_index": call["output_index"],
+                                    "delta": partial,
+                                }
+                            ),
+                        )
+                    )
+                    return events
                 if index in self.ignored_tool_indexes or index not in self.tool_calls:
                     return events
                 partial = delta.get("partial_json", "")
@@ -2681,6 +3131,22 @@ class ResponsesEventTranslator:
                     self.reasoning_encrypted[reasoning_index] = encrypted_content
             if index in self.tool_calls:
                 events.extend(self._close_tool(index))
+            if index in self.mcp_calls:
+                call = self.mcp_calls[index]
+                arguments = self.mcp_args.get(index, "") or self.mcp_seed_args.get(index, "{}")
+                events.append(
+                    self._emit(
+                        "response.mcp_call_arguments.done",
+                        {
+                            "type": "response.mcp_call_arguments.done",
+                            "item_id": call["call_id"],
+                            "output_index": call["output_index"],
+                            "arguments": arguments,
+                        },
+                    )
+                )
+            if index in self.mcp_result_indexes:
+                events.extend(self._close_mcp_call(self.mcp_result_indexes[index]))
             return events
 
         if event_type == "message_delta":
@@ -2699,6 +3165,9 @@ class ResponsesEventTranslator:
                 events.extend(self._close_reasoning(index))
             for index in sorted(self.tool_calls):
                 events.extend(self._close_tool(index))
+            for index in sorted(self.mcp_calls):
+                if index not in self.mcp_done:
+                    events.extend(self._close_mcp_call(index))
             events.extend(self._emit_completed())
             return events
 
@@ -2714,6 +3183,9 @@ class ResponsesEventTranslator:
             events.extend(self._close_reasoning(index))
         for index in sorted(self.tool_calls):
             events.extend(self._close_tool(index))
+        for index in sorted(self.mcp_calls):
+            if index not in self.mcp_done:
+                events.extend(self._close_mcp_call(index))
         events.extend(self._emit_completed())
         return events
 

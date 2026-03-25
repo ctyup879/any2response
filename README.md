@@ -120,7 +120,9 @@ UPSTREAM_BASE_URL=https://api.minimaxi.com/anthropic/v1/messages?beta=true
 `UPSTREAM_COMPAT_PROFILE` 目前支持：
 
 - `minimax`：按 MiniMax 当前 Anthropic 兼容能力收紧，普通消息里的 `input_image` / `input_file` 以及 `stop` 会本地拒绝
-- `anthropic`：保留标准 Anthropic 兼容翻译，允许普通消息里的 `input_image` / `input_file` 与 `stop`
+- `anthropic`：保留标准 Anthropic 兼容翻译，允许普通消息里的 `input_image` / `input_file`、`stop`、Anthropic Files API `file_id` 引用，以及远程 MCP server
+
+当请求里实际用到 Anthropic Files API 或 MCP connector 时，代理会自动追加对应的 `anthropic-beta` 标头；不需要手工改代码。
 
 ### 启动
 
@@ -262,6 +264,10 @@ codex exec --profile m128py "Read README.md, then reply with only the first head
 - 文本输入
 - `UPSTREAM_COMPAT_PROFILE=anthropic` 下的 `data:` URL 或 `http(s)` URL 图片输入
 - `UPSTREAM_COMPAT_PROFILE=anthropic` 下的内联 text、JSON、image、PDF 文件输入
+- `UPSTREAM_COMPAT_PROFILE=anthropic` 下的 `input_image.file_id`
+- `UPSTREAM_COMPAT_PROFILE=anthropic` 下的 `input_file.file_id`（当前支持 image / PDF / `text/plain`）
+- `UPSTREAM_COMPAT_PROFILE=anthropic` 下的远程 MCP server：`tools[].type=mcp`
+- `UPSTREAM_COMPAT_PROFILE=anthropic` 下的 `mcp_call` 输出与 replay bridge
 - 显式提供时的 `max_output_tokens`
 - `temperature`
 - `top_p`
@@ -289,12 +295,13 @@ codex exec --profile m128py "Read README.md, then reply with only the first head
 - `prompt_cache_retention`
 - `safety_identifier`
 - `service_tier`
-- 所有 provider 下的 `input_file.file_id`
-- 所有 provider 下的 `input_image.file_id`
 - 所有 provider 下的非 `auto` `input_image.detail`
-- `UPSTREAM_COMPAT_PROFILE=minimax` 下普通消息里的 `input_image` / `input_file`
+- `UPSTREAM_COMPAT_PROFILE=minimax` 下普通消息里的 `input_image` / `input_file`（包含 `file_id` 形式）
 - 远程文本文件抓取和大多数非文本/非图片/非 PDF 文件类型
-- `file_search`、`web_search`、`computer_use`、`code_interpreter`、`mcp` 等 hosted / remote OpenAI tools
+- `file_search`、`web_search`、`computer_use`、`code_interpreter` 等 hosted / remote OpenAI tools
+- `mcp.connector_id`
+- 需要 approval flow 的 MCP tool 配置；当前仅支持 `require_approval="never"`
+- 原生 OpenAI `mcp_list_tools` / `mcp_approval_request` / `mcp_approval_response` item 语义
 - 完整 OpenAI reasoning replay 语义
 - 除 `reasoning.encrypted_content` 之外的 `include` 值
 - 所有 `top_logprobs`
@@ -311,6 +318,7 @@ codex exec --profile m128py "Read README.md, then reply with only the first head
 - `reasoning.summary` 和已废弃的 `reasoning.generate_summary` 由代理基于返回的 `thinking` 文本生成，不是上游原生摘要控制
 - `reasoning.encrypted_content` 目前是 proxy-local opaque bridge：本代理生成的值可由本代理回放，不等同于 OpenAI 原生可移植语义
 - function tools 的 `strict=false` 为 Codex 兼容而接受，但不会被上游强制执行
+- Anthropic MCP connector 会桥接到 OpenAI Responses 的 `mcp` / `mcp_call` 子集，但 approval/list-tools 流程仍未实现
 - Codex 默认注入且未显式选中的 unnamed hosted tools（例如 `web_search`）会在本地被过滤，不会转发到上游
 - 非法请求形状会在本地直接拒绝，而不是静默规范化
 
