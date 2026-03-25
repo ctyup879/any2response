@@ -688,6 +688,104 @@ def test_translate_anthropic_tool_use_stream_to_shell_call_events():
     assert output_item["action"] == {"commands": ["pwd"], "timeout_ms": 1000}
 
 
+def test_translate_anthropic_web_search_stream_to_web_search_call_and_url_citations():
+    translator = ResponsesEventTranslator(
+        response_context={"include": ["web_search_call.action.sources"]},
+    )
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_search"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "server_tool_use", "id": "ws_1", "name": "web_search"},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "input_json_delta", "partial_json": "{\"query\":\"claude shannon birth date\"}"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {
+                "type": "web_search_tool_result",
+                "tool_use_id": "ws_1",
+                "content": [
+                    {
+                        "type": "web_search_result",
+                        "url": "https://en.wikipedia.org/wiki/Claude_Shannon",
+                        "title": "Claude Shannon - Wikipedia",
+                        "encrypted_content": "enc_123",
+                    }
+                ],
+            },
+        },
+        {"type": "content_block_stop", "index": 1},
+        {
+            "type": "content_block_start",
+            "index": 2,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 2,
+            "delta": {"type": "text_delta", "text": "Claude Shannon was born on April 30, 1916."},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 2,
+            "delta": {
+                "type": "citations_delta",
+                "citation": {
+                    "type": "web_search_result_location",
+                    "url": "https://en.wikipedia.org/wiki/Claude_Shannon",
+                    "title": "Claude Shannon - Wikipedia",
+                    "encrypted_index": "idx_123",
+                    "cited_text": "Claude Elwood Shannon (April 30, 1916",
+                },
+            },
+        },
+        {"type": "content_block_stop", "index": 2},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 1, "output_tokens": 1}},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    searching = next(event for event in events if event["event"] == "response.web_search_call.searching")
+    completed_call = next(event for event in events if event["event"] == "response.web_search_call.completed")
+    message_done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "message"
+    )
+    response_done = next(event for event in events if event["event"] == "response.completed")
+    web_search_item = next(
+        item for item in response_done["data"]["response"]["output"] if item["type"] == "web_search_call"
+    )
+
+    assert searching["data"]["item_id"] == "ws_1"
+    assert completed_call["data"]["item"]["action"] == {
+        "type": "search",
+        "query": "claude shannon birth date",
+        "sources": [{"type": "url", "url": "https://en.wikipedia.org/wiki/Claude_Shannon"}],
+    }
+    assert message_done["data"]["item"]["content"][0]["annotations"] == [
+        {
+            "type": "url_citation",
+            "start_index": 0,
+            "end_index": 42,
+            "url": "https://en.wikipedia.org/wiki/Claude_Shannon",
+            "title": "Claude Shannon - Wikipedia",
+        }
+    ]
+    assert web_search_item["action"]["sources"] == [{"type": "url", "url": "https://en.wikipedia.org/wiki/Claude_Shannon"}]
+
+
 def test_translate_anthropic_shell_stream_preserves_environment_and_argument_payload():
     translator = ResponsesEventTranslator(
         response_context={"tools": [{"type": "shell", "name": "shell"}]},

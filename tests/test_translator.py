@@ -143,6 +143,56 @@ def test_translate_responses_request_supports_custom_tools_with_grammar_format()
     ]
 
 
+def test_translate_responses_request_supports_web_search_tool_for_anthropic_profile():
+    translated = translate_responses_request(
+        {
+            "model": "claude-sonnet-4-5",
+            "input": "hello",
+            "tools": [
+                {
+                    "type": "web_search",
+                    "user_location": {
+                        "type": "approximate",
+                        "city": "San Francisco",
+                        "region": "California",
+                        "country": "US",
+                        "timezone": "America/Los_Angeles",
+                    },
+                    "allowed_domains": ["example.com"],
+                }
+            ],
+        },
+        provider_profile="anthropic",
+    )
+
+    assert translated["tools"] == [
+        {
+            "type": "web_search_20250305",
+            "name": "web_search",
+            "user_location": {
+                "type": "approximate",
+                "city": "San Francisco",
+                "region": "California",
+                "country": "US",
+                "timezone": "America/Los_Angeles",
+            },
+            "allowed_domains": ["example.com"],
+        }
+    ]
+
+
+def test_build_response_context_supports_web_search_sources_include():
+    context = build_response_context(
+        {
+            "model": "claude-sonnet-4-5",
+            "input": "hello",
+            "include": ["web_search_call.action.sources"],
+        }
+    )
+
+    assert context["include"] == ["web_search_call.action.sources"]
+
+
 def test_translate_responses_request_rejects_lark_custom_tool_format():
     with pytest.raises(UnsupportedFeatureError, match="custom tool format"):
         translate_responses_request(
@@ -187,6 +237,54 @@ def test_translate_responses_request_ignores_nameless_hosted_tools_when_mixed_wi
             "name": "echo",
             "description": "Echo input",
             "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}},
+        }
+    ]
+
+
+def test_translate_responses_request_accepts_web_search_call_items_for_anthropic_profile():
+    translated = translate_responses_request(
+        {
+            "model": "claude-sonnet-4-5",
+            "input": [
+                {
+                    "type": "web_search_call",
+                    "id": "ws_1",
+                    "status": "completed",
+                    "action": {
+                        "type": "search",
+                        "query": "claude shannon birth date",
+                        "sources": [
+                            {"type": "url", "url": "https://en.wikipedia.org/wiki/Claude_Shannon", "title": "Claude Shannon"},
+                        ],
+                    },
+                }
+            ],
+        },
+        provider_profile="anthropic",
+    )
+
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "ws_1",
+                    "name": "web_search",
+                    "input": {"query": "claude shannon birth date"},
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "ws_1",
+                    "content": [
+                        {
+                            "type": "web_search_result",
+                            "url": "https://en.wikipedia.org/wiki/Claude_Shannon",
+                            "title": "Claude Shannon",
+                        }
+                    ],
+                },
+            ],
         }
     ]
 
@@ -1300,6 +1398,129 @@ def test_translate_anthropic_response_maps_shell_environment_to_builtin_call():
             "status": "completed",
         }
     ]
+
+
+def test_translate_anthropic_response_maps_web_search_server_tool_to_web_search_call():
+    body = {
+        "id": "msg_search",
+        "content": [
+            {
+                "type": "server_tool_use",
+                "id": "ws_1",
+                "name": "web_search",
+                "input": {"query": "claude shannon birth date"},
+            },
+            {
+                "type": "web_search_tool_result",
+                "tool_use_id": "ws_1",
+                "content": [
+                    {
+                        "type": "web_search_result",
+                        "url": "https://en.wikipedia.org/wiki/Claude_Shannon",
+                        "title": "Claude Shannon - Wikipedia",
+                        "encrypted_content": "enc_123",
+                    }
+                ],
+            },
+            {
+                "type": "text",
+                "text": "Claude Shannon was born on April 30, 1916.",
+                "citations": [
+                    {
+                        "type": "web_search_result_location",
+                        "url": "https://en.wikipedia.org/wiki/Claude_Shannon",
+                        "title": "Claude Shannon - Wikipedia",
+                        "encrypted_index": "idx_123",
+                        "cited_text": "Claude Elwood Shannon (April 30, 1916",
+                    }
+                ],
+            },
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    translated = translate_anthropic_response(
+        body,
+        "claude-sonnet-4-5",
+        response_context={"include": ["web_search_call.action.sources"]},
+    )
+
+    assert translated["output"][0] == {
+        "id": "ws_1",
+        "type": "web_search_call",
+        "status": "completed",
+        "action": {
+            "type": "search",
+            "query": "claude shannon birth date",
+            "sources": [{"type": "url", "url": "https://en.wikipedia.org/wiki/Claude_Shannon"}],
+        },
+    }
+    assert translated["output"][1]["type"] == "message"
+    assert translated["output"][1]["content"][0]["annotations"] == [
+        {
+            "type": "url_citation",
+            "start_index": 0,
+            "end_index": 42,
+            "url": "https://en.wikipedia.org/wiki/Claude_Shannon",
+            "title": "Claude Shannon - Wikipedia",
+        }
+    ]
+
+
+def test_translate_anthropic_response_maps_search_result_location_citations_to_url_annotations():
+    translated = translate_anthropic_response(
+        {
+            "id": "msg_search_result",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "The rate limit is 1000 requests per hour.",
+                    "citations": [
+                        {
+                            "type": "search_result_location",
+                            "source": "https://docs.company.com/rate-limits",
+                            "title": "Rate Limits",
+                            "cited_text": "1000 requests per hour",
+                            "search_result_index": 0,
+                            "start_block_index": 0,
+                            "end_block_index": 0,
+                        }
+                    ],
+                }
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+        "claude-sonnet-4-5",
+    )
+
+    assert translated["output"][0]["content"][0]["annotations"] == [
+        {
+            "type": "url_citation",
+            "start_index": 0,
+            "end_index": 41,
+            "url": "https://docs.company.com/rate-limits",
+            "title": "Rate Limits",
+        }
+    ]
+
+
+def test_translate_anthropic_response_rejects_unsupported_server_tool_use_blocks():
+    with pytest.raises(UnsupportedFeatureError, match="server_tool_use"):
+        translate_anthropic_response(
+            {
+                "id": "msg_tool",
+                "content": [
+                    {
+                        "type": "server_tool_use",
+                        "id": "srv_1",
+                        "name": "code_execution",
+                        "input": {},
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+            "claude-sonnet-4-5",
+        )
 
 
 def test_translate_anthropic_response_falls_back_to_shell_tool_environment_definition():

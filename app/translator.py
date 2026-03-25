@@ -33,17 +33,20 @@ IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES = {
     "image_generation",
 }
 
-SUPPORTED_RESPONSES_TOOL_TYPES = {None, "function", "custom", "apply_patch", "shell", "mcp"}
+SUPPORTED_RESPONSES_TOOL_TYPES = {None, "function", "custom", "apply_patch", "shell", "mcp", "web_search"}
 SUPPORTED_PROVIDER_PROFILES = {"minimax", "anthropic", "generic"}
-SUPPORTED_INCLUDE_VALUES = {"reasoning.encrypted_content"}
+SUPPORTED_INCLUDE_VALUES = {"reasoning.encrypted_content", "web_search_call.action.sources"}
 REASONING_BRIDGE_PREFIX = "a2r_reasoning_v1:"
 
 
-def _has_supported_translatable_tool(tools):
+def _has_supported_translatable_tool(tools, provider_profile="minimax"):
     for tool in tools or []:
         if not isinstance(tool, dict):
             continue
-        if tool.get("type") in SUPPORTED_RESPONSES_TOOL_TYPES:
+        tool_type = tool.get("type")
+        if tool_type == "web_search" and not _provider_supports_web_search(provider_profile):
+            continue
+        if tool_type in SUPPORTED_RESPONSES_TOOL_TYPES:
             return True
     return False
 
@@ -117,6 +120,18 @@ def _provider_supports_message_media(provider_profile):
 
 def _provider_supports_stop_sequences(provider_profile):
     return _normalize_provider_profile(provider_profile) != "minimax"
+
+
+def _provider_supports_web_search(provider_profile):
+    return _normalize_provider_profile(provider_profile) != "minimax"
+
+
+def _should_ignore_unnamed_hosted_tool(tool_type, tool_name, provider_profile, has_supported_local_tool):
+    if tool_name:
+        return False
+    if tool_type == "web_search" and _provider_supports_web_search(provider_profile):
+        return False
+    return tool_type in IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES and has_supported_local_tool
 
 
 def _provider_supports_files_api(provider_profile):
@@ -409,6 +424,92 @@ def _shell_environment_schema():
             },
         ]
     }
+
+
+def _normalize_domain_list(value, feature_name):
+    if value is None:
+        return None
+    if not isinstance(value, list) or not value:
+        raise UnsupportedFeatureError(f"Unsupported Responses API feature: {feature_name} is not supported")
+    normalized = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise UnsupportedFeatureError(f"Unsupported Responses API feature: {feature_name} is not supported")
+        normalized.append(item.strip())
+    return normalized
+
+
+def _normalize_web_search_user_location(value):
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: web_search.user_location is not supported")
+    unknown_keys = set(value) - {"type", "city", "region", "country", "timezone"}
+    if unknown_keys:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: web_search.user_location is not supported")
+    if value.get("type") != "approximate":
+        raise UnsupportedFeatureError("Unsupported Responses API feature: web_search.user_location is not supported")
+    normalized = {"type": "approximate"}
+    for key in ("city", "region", "country", "timezone"):
+        field_value = value.get(key)
+        if field_value is None:
+            continue
+        if not isinstance(field_value, str) or not field_value.strip():
+            raise UnsupportedFeatureError("Unsupported Responses API feature: web_search.user_location is not supported")
+        normalized[key] = field_value.strip()
+    return normalized
+
+
+def _normalize_web_search_tool(tool, provider_profile="minimax"):
+    if not _provider_supports_web_search(provider_profile):
+        raise UnsupportedFeatureError("Unsupported Responses API tool type: web_search")
+    normalized = {"type": "web_search", "name": "web_search"}
+    name = tool.get("name")
+    if name is not None:
+        normalized["name"] = _normalize_tool_choice_name(name, "web_search.name")
+    search_context_size = tool.get("search_context_size")
+    if search_context_size is not None:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: web_search.search_context_size is not supported")
+    filters = tool.get("filters")
+    if filters is not None and not isinstance(filters, dict):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: web_search.filters is not supported")
+    allowed_domains = tool.get("allowed_domains")
+    blocked_domains = tool.get("blocked_domains")
+    user_location = tool.get("user_location")
+    if isinstance(filters, dict):
+        if allowed_domains is None:
+            allowed_domains = filters.get("allowed_domains")
+        if blocked_domains is None:
+            blocked_domains = filters.get("blocked_domains")
+        if user_location is None:
+            user_location = filters.get("user_location")
+        if filters.get("search_context_size") is not None:
+            raise UnsupportedFeatureError("Unsupported Responses API feature: web_search.search_context_size is not supported")
+        unknown_filter_keys = set(filters) - {"allowed_domains", "blocked_domains", "user_location", "search_context_size"}
+        if unknown_filter_keys:
+            raise UnsupportedFeatureError("Unsupported Responses API feature: web_search.filters is not supported")
+    allowed_domains = _normalize_domain_list(allowed_domains, "web_search.allowed_domains")
+    blocked_domains = _normalize_domain_list(blocked_domains, "web_search.blocked_domains")
+    user_location = _normalize_web_search_user_location(user_location)
+    if allowed_domains is not None:
+        normalized["allowed_domains"] = allowed_domains
+    if blocked_domains is not None:
+        normalized["blocked_domains"] = blocked_domains
+    if user_location is not None:
+        normalized["user_location"] = user_location
+    return normalized
+
+
+def _web_search_tool_payload(tool):
+    payload = {
+        "type": "web_search_20250305",
+        "name": tool.get("name", "web_search"),
+    }
+    for field_name in ("allowed_domains", "blocked_domains", "user_location"):
+        field_value = tool.get(field_name)
+        if field_value is not None:
+            payload[field_name] = field_value
+    return payload
 
 
 def _normalize_shell_skill(skill):
@@ -786,7 +887,7 @@ def _mcp_toolset_payload(tool):
 def _translate_tools(tools, provider_profile="minimax"):
     if tools is not None and not isinstance(tools, list):
         raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
-    has_supported_local_tool = _has_supported_translatable_tool(tools)
+    has_supported_local_tool = _has_supported_translatable_tool(tools, provider_profile=provider_profile)
     translated = []
     mcp_servers = []
     for tool in tools or []:
@@ -794,7 +895,7 @@ def _translate_tools(tools, provider_profile="minimax"):
             raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
         tool_type = tool.get("type")
         tool_name = tool.get("name") or tool.get("function", {}).get("name", "")
-        if tool_type in IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES and not tool_name and has_supported_local_tool:
+        if _should_ignore_unnamed_hosted_tool(tool_type, tool_name, provider_profile, has_supported_local_tool):
             continue
         if tool_type not in SUPPORTED_RESPONSES_TOOL_TYPES:
             raise UnsupportedFeatureError(
@@ -811,6 +912,9 @@ def _translate_tools(tools, provider_profile="minimax"):
                 server["authorization_token"] = normalized_tool["authorization"]
             translated.append(_mcp_toolset_payload(normalized_tool))
             mcp_servers.append(server)
+            continue
+        if tool_type == "web_search":
+            translated.append(_web_search_tool_payload(_normalize_web_search_tool(tool, provider_profile=provider_profile)))
             continue
         if tool_type in {"apply_patch", "shell"} and not tool_name:
             tool_name = tool_type
@@ -874,7 +978,7 @@ def _known_response_tool_names(tools):
                 if isinstance(allowed_name, str) and allowed_name.strip():
                     names.add(allowed_name.strip())
             continue
-        if tool_type in {"apply_patch", "shell"} and not name:
+        if tool_type in {"apply_patch", "shell", "web_search"} and not name:
             name = tool_type
         if isinstance(name, str) and name.strip():
             names.add(name.strip())
@@ -924,6 +1028,8 @@ def _builtin_tool_type_for_name(name):
         return "apply_patch_call"
     if name == "shell":
         return "shell_call"
+    if name == "web_search":
+        return "web_search_call"
     return None
 
 
@@ -949,6 +1055,8 @@ def _tool_type_lookup(response_context):
             lookup[name.strip()] = "apply_patch_call"
         elif tool_type == "shell":
             lookup[name.strip()] = "shell_call"
+        elif tool_type == "web_search":
+            lookup[name.strip()] = "web_search_call"
         else:
             lookup.setdefault(name.strip(), "function_call")
     return lookup
@@ -1049,11 +1157,11 @@ def _output_text_logprobs(response_context=None):
     return None
 
 
-def _output_text_part(text, response_context=None):
+def _output_text_part(text, response_context=None, annotations=None):
     part = {
         "type": "output_text",
         "text": text,
-        "annotations": [],
+        "annotations": list(annotations or []),
     }
     logprobs = _output_text_logprobs(response_context)
     if logprobs is not None:
@@ -1089,19 +1197,22 @@ def _text_delta_payload(item_id, output_index, delta_text, response_context=None
     return payload
 
 
-def _assistant_message_item_payload(item_id, text, status, phase="final_answer", response_context=None):
+def _assistant_message_item_payload(item_id, text, status, phase="final_answer", response_context=None, annotations=None):
     return {
         "id": item_id,
         "type": "message",
         "role": "assistant",
         "phase": phase,
         "status": status,
-        "content": [_output_text_part(text, response_context=response_context)],
+        "content": [_output_text_part(text, response_context=response_context, annotations=annotations)],
     }
 
 
 def _assistant_blocks_have_open_tool_use(blocks):
-    return any(isinstance(block, dict) and block.get("type") in {"tool_use", "mcp_tool_use"} for block in blocks)
+    return any(
+        isinstance(block, dict) and block.get("type") in {"tool_use", "mcp_tool_use", "server_tool_use"}
+        for block in blocks
+    )
 
 
 def _apply_assistant_phase(content_blocks, phase):
@@ -1169,6 +1280,150 @@ def _mcp_output_text(value):
             return value["text"]
         return json.dumps(value, ensure_ascii=False)
     return _stringify(value)
+
+
+def _web_search_sources_include_enabled(response_context=None):
+    include = []
+    if isinstance(response_context, dict):
+        include = response_context.get("include", []) or []
+    return "web_search_call.action.sources" in include
+
+
+def _normalize_url_source(source):
+    if not isinstance(source, dict):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: web_search_call.action.sources is not supported")
+    if source.get("type") not in {None, "url"}:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: web_search_call.action.sources is not supported")
+    url = source.get("url")
+    if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: web_search_call.action.sources is not supported")
+    normalized = {"type": "url", "url": url}
+    title = source.get("title")
+    if title is not None:
+        if not isinstance(title, str) or not title.strip():
+            raise UnsupportedFeatureError("Unsupported Responses API feature: web_search_call.action.sources is not supported")
+        normalized["title"] = title.strip()
+    return normalized
+
+
+def _web_search_sources_from_results(content):
+    if not isinstance(content, list):
+        return []
+    sources = []
+    seen_urls = set()
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "web_search_result":
+            continue
+        url = part.get("url")
+        if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+            continue
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        source = {"type": "url", "url": url}
+        title = part.get("title")
+        if isinstance(title, str) and title.strip():
+            source["title"] = title.strip()
+        sources.append(source)
+    return sources
+
+
+def _web_search_result_blocks_from_sources(sources):
+    if not isinstance(sources, list):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: web_search_call.action.sources is not supported")
+    results = []
+    for source in sources:
+        normalized = _normalize_url_source(source)
+        result = {"type": "web_search_result", "url": normalized["url"]}
+        if "title" in normalized:
+            result["title"] = normalized["title"]
+        results.append(result)
+    return results
+
+
+def _normalize_web_search_action(action):
+    if not isinstance(action, dict):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: web_search_call.action is not supported")
+    action_type = action.get("type", "search")
+    if action_type != "search":
+        raise UnsupportedFeatureError("Unsupported Responses API feature: web_search_call.action is not supported")
+    query = action.get("query")
+    if query is None:
+        queries = action.get("queries")
+        if isinstance(queries, list) and queries and isinstance(queries[0], str):
+            query = queries[0]
+    if not isinstance(query, str) or not query.strip():
+        raise UnsupportedFeatureError("Unsupported Responses API feature: web_search_call.action is not supported")
+    normalized = {"type": "search", "query": query.strip()}
+    sources = action.get("sources")
+    if sources is not None:
+        normalized["sources"] = [_normalize_url_source(source) for source in sources]
+    return normalized
+
+
+def _web_search_call_item_payload(item_id, query, status, sources=None):
+    item = {
+        "id": item_id,
+        "type": "web_search_call",
+        "status": status,
+        "action": {
+            "type": "search",
+            "query": query,
+        },
+    }
+    if sources:
+        item["action"]["sources"] = [{"type": "url", "url": source["url"]} for source in sources]
+    return item
+
+
+def _citation_annotation(text, citation):
+    if not isinstance(text, str) or not text:
+        return None
+    if not isinstance(citation, dict):
+        return None
+    citation_type = citation.get("type")
+    url = None
+    title = citation.get("title")
+    if citation_type == "web_search_result_location":
+        url = citation.get("url")
+    elif citation_type == "search_result_location":
+        source = citation.get("source")
+        if isinstance(source, str) and source.startswith(("https://", "http://")):
+            url = source
+    if not isinstance(url, str) or not url.startswith(("https://", "http://")):
+        return None
+    annotation = {
+        "type": "url_citation",
+        "start_index": 0,
+        "end_index": len(text),
+        "url": url,
+    }
+    if isinstance(title, str) and title.strip():
+        annotation["title"] = title.strip()
+    return annotation
+
+
+def _annotations_from_citations(text, citations):
+    if not isinstance(citations, list):
+        return []
+    annotations = []
+    for citation in citations:
+        annotation = _citation_annotation(text, citation)
+        if annotation is not None:
+            annotations.append(annotation)
+    return annotations
+
+
+def _offset_annotations(annotations, offset):
+    adjusted = []
+    for annotation in annotations or []:
+        if not isinstance(annotation, dict):
+            continue
+        item = dict(annotation)
+        item["start_index"] = int(item.get("start_index", 0)) + offset
+        item["end_index"] = int(item.get("end_index", 0)) + offset
+        adjusted.append(item)
+    return adjusted
 
 
 def _mcp_call_item_payload(item_id, name, server_label, arguments, status, output=None, error=None):
@@ -1369,7 +1624,7 @@ def _reasoning_input_block(item):
 def _normalize_response_tools(tools, provider_profile="minimax"):
     if tools is not None and not isinstance(tools, list):
         raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
-    has_supported_local_tool = _has_supported_translatable_tool(tools)
+    has_supported_local_tool = _has_supported_translatable_tool(tools, provider_profile=provider_profile)
     normalized = []
     for tool in tools or []:
         if not isinstance(tool, dict):
@@ -1377,12 +1632,15 @@ def _normalize_response_tools(tools, provider_profile="minimax"):
         normalized_tool = dict(tool)
         tool_type = normalized_tool.get("type")
         tool_name = normalized_tool.get("name") or normalized_tool.get("function", {}).get("name", "")
-        if tool_type in IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES and not tool_name and has_supported_local_tool:
+        if _should_ignore_unnamed_hosted_tool(tool_type, tool_name, provider_profile, has_supported_local_tool):
             continue
         if tool_type not in SUPPORTED_RESPONSES_TOOL_TYPES:
             raise UnsupportedFeatureError(f"Unsupported Responses API tool type: {tool_type}")
         if tool_type == "mcp":
             normalized.append(_normalize_mcp_tool(normalized_tool, provider_profile=provider_profile))
+            continue
+        if tool_type == "web_search":
+            normalized.append(_normalize_web_search_tool(normalized_tool, provider_profile=provider_profile))
             continue
         if tool_type in {"apply_patch", "shell"} and not normalized_tool.get("name"):
             normalized_tool["name"] = tool_type
@@ -1446,11 +1704,15 @@ def _effective_response_tools(body, provider_profile="minimax"):
         if all(tool.get("name") != name for tool in tools if isinstance(tool, dict)):
             tools.append({"type": choice_type, "name": name})
         return tools
+    if choice_type == "web_search":
+        if all(tool.get("name") != "web_search" for tool in tools if isinstance(tool, dict)):
+            tools.append({"type": "web_search", "name": "web_search"})
+        return tools
     if choice_type == "mcp":
         return tools
     if choice_type == "tool":
         name = tool_choice.get("name")
-        if name in {"apply_patch", "shell"} and all(tool.get("name") != name for tool in tools if isinstance(tool, dict)):
+        if name in {"apply_patch", "shell", "web_search"} and all(tool.get("name") != name for tool in tools if isinstance(tool, dict)):
             tools.append({"type": name, "name": name})
     return tools
 
@@ -1597,6 +1859,8 @@ def _translate_tool_choice(tool_choice):
             return {"type": "tool", "name": "apply_patch"}
         if choice_type == "shell":
             return {"type": "tool", "name": "shell"}
+        if choice_type == "web_search":
+            return {"type": "tool", "name": "web_search"}
         if choice_type == "none":
             return {"type": "none"}
         if choice_type == "required":
@@ -1618,7 +1882,7 @@ def _allowed_tool_names(tool_choice):
         if not isinstance(tool, dict):
             raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.allowed_tools is not supported")
         name = tool.get("name") or tool.get("function", {}).get("name", "")
-        if not name and tool.get("type") in {"apply_patch", "shell"}:
+        if not name and tool.get("type") in {"apply_patch", "shell", "web_search"}:
             name = tool["type"]
         if not isinstance(name, str) or not name.strip():
             raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.allowed_tools is not supported")
@@ -2093,6 +2357,47 @@ def translate_responses_request(body, provider_profile="minimax"):
                 current_assistant_blocks.append(result_block)
             continue
 
+        if item_type == "web_search_call":
+            call_id = item.get("id")
+            if not isinstance(call_id, str) or not call_id:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: web_search_call id is required")
+            status = item.get("status")
+            if status not in {None, "searching", "completed", "failed", "incomplete"}:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: web_search_call status is not supported")
+            action = _normalize_web_search_action(item.get("action"))
+            flush_tool_results()
+            if current_assistant_blocks and not _assistant_blocks_have_open_tool_use(current_assistant_blocks):
+                flush_assistant()
+            current_assistant_blocks.append(
+                {
+                    "type": "server_tool_use",
+                    "id": call_id,
+                    "name": "web_search",
+                    "input": {"query": action["query"]},
+                }
+            )
+            if status in {"completed", "failed"} or action.get("sources"):
+                if status == "failed":
+                    current_assistant_blocks.append(
+                        {
+                            "type": "web_search_tool_result",
+                            "tool_use_id": call_id,
+                            "content": {
+                                "type": "web_search_tool_result_error",
+                                "error_code": "unavailable",
+                            },
+                        }
+                    )
+                elif action.get("sources"):
+                    current_assistant_blocks.append(
+                        {
+                            "type": "web_search_tool_result",
+                            "tool_use_id": call_id,
+                            "content": _web_search_result_blocks_from_sources(action["sources"]),
+                        }
+                    )
+            continue
+
         if item_type in {
             "function_call_output",
             "custom_tool_call_output",
@@ -2183,6 +2488,7 @@ def translate_anthropic_response(body, model, response_context=None):
     parallel_tool_calls = True if response_context is None else response_context.get("parallel_tool_calls", True)
     tool_call_seen = False
     mcp_calls = {}
+    web_search_calls = {}
     response_status, incomplete_details = _response_completion_from_stop_reason(body.get("stop_reason"))
     message_status = "completed" if response_status == "completed" else "incomplete"
     reasoning_status = message_status
@@ -2218,6 +2524,7 @@ def translate_anthropic_response(body, model, response_context=None):
                 )
         elif block_type == "text":
             text = block.get("text", "")
+            annotations = _annotations_from_citations(text, block.get("citations"))
             final_text_parts.append(text)
             output.append(
                 _assistant_message_item_payload(
@@ -2226,8 +2533,36 @@ def translate_anthropic_response(body, model, response_context=None):
                     message_status,
                     phase="final_answer",
                     response_context=response_context,
+                    annotations=annotations,
                 )
             )
+        elif block_type == "server_tool_use":
+            call_id = block.get("id")
+            if not isinstance(call_id, str) or not call_id:
+                raise UnsupportedFeatureError("Unsupported Anthropic response block: server_tool_use.id is required")
+            name = block.get("name")
+            if name != "web_search":
+                raise UnsupportedFeatureError("Unsupported Anthropic response block: server_tool_use is not supported")
+            query = ""
+            if isinstance(block.get("input"), dict) and isinstance(block["input"].get("query"), str):
+                query = block["input"]["query"]
+            item = _web_search_call_item_payload(call_id, query, "searching")
+            web_search_calls[call_id] = item
+            output.append(item)
+        elif block_type == "web_search_tool_result":
+            call_id = block.get("tool_use_id")
+            if not isinstance(call_id, str) or not call_id or call_id not in web_search_calls:
+                raise UnsupportedFeatureError("Unsupported Anthropic response block: orphan web_search_tool_result is not supported")
+            item = web_search_calls[call_id]
+            content = block.get("content")
+            if isinstance(content, dict) and content.get("type") == "web_search_tool_result_error":
+                item["status"] = "failed"
+            else:
+                item["status"] = "completed"
+                if _web_search_sources_include_enabled(response_context):
+                    sources = _web_search_sources_from_results(content)
+                    if sources:
+                        item["action"]["sources"] = [{"type": "url", "url": source["url"]} for source in sources]
         elif block_type == "tool_use":
             if not parallel_tool_calls and tool_call_seen:
                 raise UnsupportedFeatureError(
@@ -2280,6 +2615,8 @@ def translate_anthropic_response(body, model, response_context=None):
             else:
                 item["output"] = content_text
                 item["status"] = "completed"
+        else:
+            raise UnsupportedFeatureError(f"Unsupported Anthropic response block: {block_type} is not supported")
 
     response = {
         "id": response_id,
@@ -2309,6 +2646,8 @@ class ResponsesEventTranslator:
         self.started = False
         self.completed = False
         self.text_buffers = {}
+        self.message_annotations = {}
+        self.text_block_targets = {}
         self.message_added = set()
         self.content_added = set()
         self.message_done = set()
@@ -2331,6 +2670,11 @@ class ResponsesEventTranslator:
         self.mcp_seed_args = {}
         self.mcp_done = set()
         self.mcp_result_indexes = {}
+        self.web_search_calls = {}
+        self.web_search_call_ids = {}
+        self.web_search_queries = {}
+        self.web_search_done = set()
+        self.web_search_result_indexes = {}
         self.ignored_tool_indexes = set()
         self.usage = {}
         self.stop_reason = None
@@ -2440,6 +2784,7 @@ class ResponsesEventTranslator:
                         self._final_reasoning_status() if self.commentary_index in self.commentary_done else "in_progress",
                         phase="commentary",
                         response_context=self.response_context,
+                        annotations=self.message_annotations.get(self.commentary_index, []),
                     ),
                 )
             )
@@ -2454,6 +2799,7 @@ class ResponsesEventTranslator:
                         self._final_message_status() if self.final_message_index in self.message_done else "in_progress",
                         phase="final_answer",
                         response_context=self.response_context,
+                        annotations=self.message_annotations.get(self.final_message_index, []),
                     ),
                 )
             )
@@ -2491,6 +2837,15 @@ class ResponsesEventTranslator:
                     ),
                 )
             )
+        for index in sorted(self.web_search_calls):
+            call = self.web_search_calls[index]
+            item = _web_search_call_item_payload(
+                call["call_id"],
+                self.web_search_queries.get(index, ""),
+                call["status"] if index in self.web_search_done else "searching",
+                sources=call.get("sources"),
+            )
+            items.append((call["output_index"], item))
         items.sort(key=lambda pair: pair[0])
         return [item for _, item in items]
 
@@ -2627,6 +2982,7 @@ class ResponsesEventTranslator:
             return []
         done_set.add(index)
         text = buffers.get(index, "")
+        annotations = self.message_annotations.get(index, [])
         return [
             self._emit(
                 "response.output_text.done",
@@ -2639,7 +2995,7 @@ class ResponsesEventTranslator:
                     "item_id": message_id,
                     "output_index": index,
                     "content_index": 0,
-                    "part": _output_text_part(text, response_context=self.response_context),
+                    "part": _output_text_part(text, response_context=self.response_context, annotations=annotations),
                 },
             ),
             self._emit(
@@ -2653,6 +3009,7 @@ class ResponsesEventTranslator:
                         final_status,
                         phase=phase,
                         response_context=self.response_context,
+                        annotations=annotations,
                     ),
                 },
             ),
@@ -2831,6 +3188,37 @@ class ResponsesEventTranslator:
             ),
         ]
 
+    def _close_web_search_call(self, index):
+        if index not in self.web_search_calls or index in self.web_search_done:
+            return []
+        self.web_search_done.add(index)
+        call = self.web_search_calls[index]
+        item = _web_search_call_item_payload(
+            call["call_id"],
+            self.web_search_queries.get(index, ""),
+            call["status"],
+            sources=call.get("sources"),
+        )
+        return [
+            self._emit(
+                "response.web_search_call.completed",
+                {
+                    "type": "response.web_search_call.completed",
+                    "item_id": call["call_id"],
+                    "output_index": call["output_index"],
+                    "item": item,
+                },
+            ),
+            self._emit(
+                "response.output_item.done",
+                {
+                    "type": "response.output_item.done",
+                    "output_index": call["output_index"],
+                    "item": item,
+                },
+            ),
+        ]
+
     def _emit_completed(self):
         if self.completed:
             return []
@@ -2867,7 +3255,18 @@ class ResponsesEventTranslator:
             block = event.get("content_block", {})
             self.content_block_types[index] = block.get("type")
             if block.get("type") == "text":
+                output_index = self._final_message_output_index()
                 events.extend(self._ensure_text_started(index))
+                start_offset = len(self.text_buffers.get(output_index, ""))
+                self.text_block_targets[index] = {"output_index": output_index, "start_offset": start_offset}
+                initial_text = block.get("text", "")
+                if isinstance(initial_text, str) and initial_text:
+                    self.text_buffers[output_index] = self.text_buffers.get(output_index, "") + initial_text
+                annotations = _annotations_from_citations(initial_text, block.get("citations"))
+                if annotations:
+                    self.message_annotations.setdefault(output_index, []).extend(
+                        _offset_annotations(annotations, start_offset)
+                    )
             elif block.get("type") in {"thinking", "redacted_thinking"}:
                 reasoning_index = self._reasoning_output_index()
                 meta = {"type": block.get("type", "thinking")}
@@ -2980,6 +3379,67 @@ class ResponsesEventTranslator:
                 else:
                     call["output"] = content_text
                     call["status"] = "completed"
+            elif block.get("type") == "server_tool_use":
+                call_id = block.get("id")
+                if not isinstance(call_id, str) or not call_id:
+                    raise UnsupportedFeatureError("Unsupported Anthropic response block: server_tool_use.id is required")
+                name = block.get("name")
+                if name != "web_search":
+                    raise UnsupportedFeatureError("Unsupported Anthropic response block: server_tool_use is not supported")
+                output_index = self._tool_output_index(index)
+                query = ""
+                if isinstance(block.get("input"), dict) and isinstance(block["input"].get("query"), str):
+                    query = block["input"]["query"]
+                self.web_search_calls[index] = {
+                    "call_id": call_id,
+                    "output_index": output_index,
+                    "status": "searching",
+                    "sources": [],
+                }
+                self.web_search_call_ids[call_id] = index
+                self.web_search_queries[index] = query
+                item = _web_search_call_item_payload(call_id, query, "searching")
+                events.append(
+                    self._emit(
+                        "response.output_item.added",
+                        {
+                            "type": "response.output_item.added",
+                            "output_index": output_index,
+                            "item": item,
+                        },
+                    )
+                )
+                events.append(
+                    self._emit(
+                        "response.web_search_call.searching",
+                        {
+                            "type": "response.web_search_call.searching",
+                            "item_id": call_id,
+                            "output_index": output_index,
+                            "item": item,
+                        },
+                    )
+                )
+            elif block.get("type") == "web_search_tool_result":
+                call_id = block.get("tool_use_id")
+                if not isinstance(call_id, str) or not call_id or call_id not in self.web_search_call_ids:
+                    raise UnsupportedFeatureError(
+                        "Unsupported Anthropic response block: orphan web_search_tool_result is not supported"
+                    )
+                call_index = self.web_search_call_ids[call_id]
+                self.web_search_result_indexes[index] = call_index
+                call = self.web_search_calls[call_index]
+                content = block.get("content")
+                if isinstance(content, dict) and content.get("type") == "web_search_tool_result_error":
+                    call["status"] = "failed"
+                else:
+                    call["status"] = "completed"
+                    if _web_search_sources_include_enabled(self.response_context):
+                        call["sources"] = _web_search_sources_from_results(content)
+            elif block.get("type") is not None:
+                raise UnsupportedFeatureError(
+                    f"Unsupported Anthropic response block: {block.get('type')} is not supported"
+                )
             return events
 
         if event_type == "content_block_delta":
@@ -3004,6 +3464,21 @@ class ResponsesEventTranslator:
                         ),
                     )
                 )
+                return events
+            if delta_type == "citations_delta":
+                target = self.text_block_targets.get(index)
+                if target is None:
+                    return events
+                output_index = target["output_index"]
+                current_text = self.text_buffers.get(output_index, "")
+                start_offset = target["start_offset"]
+                block_text = current_text[start_offset:]
+                citation = delta.get("citation")
+                annotations = _annotations_from_citations(block_text, [citation])
+                if annotations:
+                    self.message_annotations.setdefault(output_index, []).extend(
+                        _offset_annotations(annotations, start_offset)
+                    )
                 return events
             if delta_type == "thinking_delta":
                 text = delta.get("thinking", "")
@@ -3072,6 +3547,20 @@ class ResponsesEventTranslator:
                         self.reasoning_encrypted[reasoning_index] = encrypted_content
                 return events
             if delta_type == "input_json_delta":
+                if index in self.web_search_calls:
+                    partial = delta.get("partial_json", "")
+                    current = self.web_search_queries.get(index, "")
+                    raw = current + partial
+                    try:
+                        parsed = json.loads(raw)
+                    except json.JSONDecodeError:
+                        self.web_search_queries[index] = raw
+                    else:
+                        if isinstance(parsed, dict) and isinstance(parsed.get("query"), str):
+                            self.web_search_queries[index] = parsed["query"]
+                        else:
+                            self.web_search_queries[index] = raw
+                    return events
                 if index in self.mcp_calls:
                     partial = delta.get("partial_json", "")
                     self.mcp_args[index] = self.mcp_args.get(index, "") + partial
@@ -3147,6 +3636,8 @@ class ResponsesEventTranslator:
                 )
             if index in self.mcp_result_indexes:
                 events.extend(self._close_mcp_call(self.mcp_result_indexes[index]))
+            if index in self.web_search_result_indexes:
+                events.extend(self._close_web_search_call(self.web_search_result_indexes[index]))
             return events
 
         if event_type == "message_delta":
@@ -3168,6 +3659,9 @@ class ResponsesEventTranslator:
             for index in sorted(self.mcp_calls):
                 if index not in self.mcp_done:
                     events.extend(self._close_mcp_call(index))
+            for index in sorted(self.web_search_calls):
+                if index not in self.web_search_done:
+                    events.extend(self._close_web_search_call(index))
             events.extend(self._emit_completed())
             return events
 
@@ -3186,6 +3680,9 @@ class ResponsesEventTranslator:
         for index in sorted(self.mcp_calls):
             if index not in self.mcp_done:
                 events.extend(self._close_mcp_call(index))
+        for index in sorted(self.web_search_calls):
+            if index not in self.web_search_done:
+                events.extend(self._close_web_search_call(index))
         events.extend(self._emit_completed())
         return events
 
