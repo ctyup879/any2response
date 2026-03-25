@@ -1144,6 +1144,11 @@ def _effective_response_tools(body):
         name = choice_type
         if all(tool.get("name") != name for tool in tools if isinstance(tool, dict)):
             tools.append({"type": choice_type, "name": name})
+        return tools
+    if choice_type == "tool":
+        name = tool_choice.get("name")
+        if name in {"apply_patch", "shell"} and all(tool.get("name") != name for tool in tools if isinstance(tool, dict)):
+            tools.append({"type": name, "name": name})
     return tools
 
 
@@ -1554,6 +1559,29 @@ def translate_responses_request(body):
                     "input_schema": _builtin_tool_input_schema(choice_type),
                 }
             )
+    if (
+        isinstance(tool_choice_input, dict)
+        and tool_choice_input.get("type") == "tool"
+        and tool_choice
+        and tool_choice.get("type") == "tool"
+        and tool_choice["name"] in {"apply_patch", "shell"}
+        and all(tool.get("name") != tool_choice["name"] for tool in tools)
+    ):
+        tools.append(
+            {
+                "name": tool_choice["name"],
+                "description": "",
+                "input_schema": _builtin_tool_input_schema(tool_choice["name"]),
+            }
+        )
+    if (
+        tool_choice
+        and tool_choice.get("type") == "tool"
+        and tool_choice["name"] not in {tool.get("name") for tool in tools}
+    ):
+        raise UnsupportedFeatureError(
+            "Unsupported Responses API feature: tool_choice references unknown tools"
+        )
     if tools:
         result["tools"] = tools
     if tool_choice:

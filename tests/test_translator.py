@@ -2899,11 +2899,36 @@ def test_translate_responses_request_supports_direct_tool_choice_shape():
         {
             "model": "codex-MiniMax-M2.7",
             "input": "hello",
+            "tools": [
+                {"type": "function", "name": "lookup_weather", "parameters": {"type": "object"}},
+            ],
             "tool_choice": {"type": "tool", "name": "lookup_weather"},
         }
     )
 
     assert translated["tool_choice"] == {"type": "tool", "name": "lookup_weather"}
+
+
+def test_translate_responses_request_rejects_named_tool_choice_without_matching_tool_definition():
+    with pytest.raises(UnsupportedFeatureError, match="tool_choice"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "tool_choice": {"type": "tool", "name": "lookup_weather"},
+            }
+        )
+
+
+def test_translate_responses_request_rejects_function_tool_choice_without_matching_tool_definition():
+    with pytest.raises(UnsupportedFeatureError, match="tool_choice"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "tool_choice": {"type": "function", "name": "lookup_weather"},
+            }
+        )
 
 
 def test_translate_responses_request_supports_custom_tool_choice_shape():
@@ -2980,6 +3005,26 @@ def test_translate_responses_request_synthesizes_builtin_tool_choice_definition(
             },
         }
     ]
+
+
+@pytest.mark.parametrize(
+    ("tool_choice", "expected_name"),
+    [
+        ({"type": "tool", "name": "apply_patch"}, "apply_patch"),
+        ({"type": "tool", "name": "shell"}, "shell"),
+    ],
+)
+def test_translate_responses_request_synthesizes_builtin_generic_tool_choice_definition(tool_choice, expected_name):
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "tool_choice": tool_choice,
+        }
+    )
+
+    assert translated["tool_choice"] == {"type": "tool", "name": expected_name}
+    assert translated["tools"][0]["name"] == expected_name
 
 
 def test_translate_responses_request_rejects_unknown_tool_choice_string():
