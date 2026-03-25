@@ -1,74 +1,74 @@
 # any2response
 
-[English](README.md) | [简体中文](README.zh-CN.md)
+[English](README.en.md) | [简体中文](README.md)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-`any2response` is a lightweight local proxy that translates upstream model APIs into the OpenAI Responses protocol.
+`any2response` 是一个轻量级的本地代理服务，用于把上游模型 API 转换成 OpenAI Responses 协议。
 
-The current implementation focuses on one practical path:
+当前实现重点覆盖一条最实用的链路：
 
-- input: OpenAI Responses-style requests
-- upstream: MiniMax Anthropic-compatible Messages API
-- output: OpenAI Responses-compatible responses and streaming events
+- 输入：OpenAI Responses 风格请求
+- 上游：MiniMax Anthropic 兼容 Messages API
+- 输出：OpenAI Responses 兼容响应与流式事件
 
-This makes it possible to plug tools such as `codex` into a single local `/v1/responses` endpoint while keeping the upstream provider behind a translation layer.
+这样可以把 `codex` 等客户端统一接到本地 `/v1/responses` 端点上，同时把上游供应商差异隔离在代理层内。
 
-## Why
+## 为什么要用它
 
-- Standardize downstream integrations on the OpenAI Responses API
-- Hide provider-specific request and streaming differences behind one proxy
-- Keep the deployment model simple: one local Python service, one HTTP endpoint
-- Provide a base that can be extended with more upstream adapters later
+- 为下游集成统一 OpenAI Responses 接口
+- 把不同供应商的请求和流式差异收敛到一个代理层
+- 保持部署模型简单：一个本地 Python 服务，一个 HTTP 端点
+- 为后续增加更多上游适配器保留扩展空间
 
-## Current Scope
+## 当前范围
 
-| Input protocol | Status | Notes |
+| 输入协议 | 状态 | 说明 |
 | --- | --- | --- |
-| OpenAI Responses | Supported | Main supported path, translated to MiniMax Anthropic-compatible Messages API |
-| OpenAI Chat Completions | Not implemented | Not available in this repository today |
-| Anthropic Messages as input | Not implemented | Current proxy is not a bidirectional protocol converter |
+| OpenAI Responses | 已支持 | 当前主路径，转换后转发到 MiniMax Anthropic 兼容 API |
+| OpenAI Chat Completions | 未实现 | 当前仓库暂不支持 |
+| Anthropic Messages 作为输入 | 未实现 | 当前不是双向任意协议转换器 |
 
-## Architecture
+## 架构
 
 ```text
 client / codex
-    -> local /v1/responses
+    -> 本地 /v1/responses
     -> Python translator
     -> MiniMax Anthropic-compatible API
     -> Python translator
     -> OpenAI Responses output
 ```
 
-Main components:
+主要组件：
 
-- `app/main.py`: FastAPI entrypoint and HTTP surface
-- `app/translator.py`: Responses <-> MiniMax/Anthropic translation logic
-- `app/client.py`: upstream HTTP client
-- `app/config.py`: environment-based settings
-- `scripts/install_user_service.py`: install a `systemd --user` service
-- `scripts/install_codex_metadata.py`: install local Codex model metadata
+- `app/main.py`：FastAPI 入口与 HTTP 接口
+- `app/translator.py`：Responses <-> MiniMax/Anthropic 转换逻辑
+- `app/client.py`：上游 HTTP 客户端
+- `app/config.py`：环境变量配置
+- `scripts/install_user_service.py`：安装 `systemd --user` 服务
+- `scripts/install_codex_metadata.py`：安装本地 Codex 模型元数据
 
-## Core Features
+## 核心特性
 
-- Responses request translation to MiniMax Anthropic-compatible messages
-- Responses-style non-streaming and streaming output
-- Function tools and Codex-oriented tool-call replay handling
-- Built-in `apply_patch` and `shell` call translation
-- Text, image, and PDF input coverage for the supported subset
-- Local proxy authentication with a separate proxy key
-- Optional `systemd --user` service installation for persistent local runs
+- 将 Responses 请求转换为 MiniMax Anthropic 兼容消息格式
+- 提供 Responses 风格的非流式与流式输出
+- 支持函数工具与面向 Codex 的工具调用回放
+- 支持内建 `apply_patch` 与 `shell` 调用转换
+- 覆盖当前支持子集内的文本、图片、PDF 输入
+- 使用独立本地代理 key 做访问认证
+- 可选安装 `systemd --user` 服务，实现常驻运行
 
-## Quick Start
+## 快速开始
 
-### Clone
+### 克隆仓库
 
 ```bash
 git clone https://github.com/ctyup879/any2response.git
 cd any2response
 ```
 
-### Install
+### 安装
 
 ```bash
 python3 -m venv .venv
@@ -76,31 +76,31 @@ python3 -m venv .venv
 cp .env.example .env
 ```
 
-Update `.env` with your real values:
+把 `.env` 改成你的真实配置：
 
 ```bash
-MINIMAX_API_KEY=your-real-minimax-key
-PROXY_API_KEY=your-local-proxy-key
+MINIMAX_API_KEY=你的 MiniMax Key
+PROXY_API_KEY=你的本地代理 Key
 HOST=127.0.0.1
 PORT=8765
 UPSTREAM_BASE_URL=https://api.minimaxi.com/anthropic/v1/messages?beta=true
 ```
 
-### Run
+### 启动
 
 ```bash
 ./start_proxy.sh
 ```
 
-The proxy listens on:
+默认监听地址：
 
 ```text
 http://127.0.0.1:8765/v1/responses
 ```
 
-## Run as a User Service
+## 作为用户服务运行
 
-Install and enable the `systemd --user` unit:
+安装并启用 `systemd --user` 服务：
 
 ```bash
 python3 scripts/install_user_service.py
@@ -108,21 +108,21 @@ systemctl --user daemon-reload
 systemctl --user enable --now minimaxdemo-proxy.service
 ```
 
-Inspect service status:
+查看服务状态：
 
 ```bash
 systemctl --user status minimaxdemo-proxy.service --no-pager
 journalctl --user -u minimaxdemo-proxy.service -n 50 --no-pager
 ```
 
-Stop or disable it:
+停止或禁用：
 
 ```bash
 systemctl --user stop minimaxdemo-proxy.service
 systemctl --user disable minimaxdemo-proxy.service
 ```
 
-## Example Request
+## 请求示例
 
 ```bash
 curl http://127.0.0.1:8765/v1/responses \
@@ -135,61 +135,92 @@ curl http://127.0.0.1:8765/v1/responses \
   }'
 ```
 
-## Codex Integration
+## Codex 接入
 
-Local examples in this repository use the profile name `m128py`.
+本仓库里的本地示例 profile 名称是 `m128py`。
 
-Install local model metadata once:
+先准备一个给 Codex 使用的环境变量。这个值应当与代理服务 `.env` 里的 `PROXY_API_KEY` 保持一致：
+
+```bash
+export MINIMAX_PROXY_API_KEY=your-local-proxy-key
+```
+
+然后在 `~/.codex/config.toml` 中加入 provider 和 profile：
+
+```toml
+[model_providers.minimax_py]
+name = "MiniMax Python Responses Proxy"
+base_url = "http://127.0.0.1:8765/v1"
+env_key = "MINIMAX_PROXY_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+request_max_retries = 4
+stream_max_retries = 10
+stream_idle_timeout_ms = 300000
+
+[profiles.m128py]
+model = "codex-MiniMax-M2.7"
+model_provider = "minimax_py"
+```
+
+先安装一次本地模型元数据：
 
 ```bash
 python3 scripts/install_codex_metadata.py
 ```
 
-After your local Codex config points to this proxy, a smoke test looks like:
+把本地 Codex 配置指向本代理后，可以这样做冒烟测试：
 
 ```bash
 codex exec --profile m128py "Reply with exactly OK and nothing else."
 ```
 
-## Protocol Coverage
+更多调用示例：
 
-This project does not implement full OpenAI Responses parity. It implements the subset needed for `codex` and adjacent tool-calling workflows, plus explicit validation around unsupported fields so requests are rejected instead of silently rewritten.
+```bash
+codex exec --profile m128py "hello"
+codex exec --profile m128py "Read README.md, then reply with only the first heading including the leading #."
+```
 
-Supported today:
+## 协议支持范围
 
-- top-level string input and message-item input
-- developer and system instructions folded into upstream `system`
+这个项目并不是完整的 OpenAI Responses 协议等价实现。它实现的是 `codex` 及相关工具调用工作流所需的子集，并且会对不支持的字段做显式校验，避免静默改写请求。
+
+当前已支持：
+
+- 顶层字符串输入和 message-item 输入
+- developer / system 指令折叠到上游 `system`
 - function tools
-- validated `tool_choice.allowed_tools`
-- named `custom`, `apply_patch`, and `shell` tool selection
-- `function_call`, `custom_tool_call`, `apply_patch_call`, `shell_call`
-- corresponding tool output items
-- embedded `tool_use` and `tool_result` blocks inside messages
-- text input
-- image input by `data:` URL or `http(s)` URL
-- inline text, JSON, image, and PDF file inputs
-- `max_output_tokens` when explicitly provided
+- 带校验的 `tool_choice.allowed_tools`
+- 命名 `custom`、`apply_patch`、`shell` 工具选择
+- `function_call`、`custom_tool_call`、`apply_patch_call`、`shell_call`
+- 对应的工具输出项
+- 消息内嵌 `tool_use` 与 `tool_result`
+- 文本输入
+- `data:` URL 或 `http(s)` URL 图片输入
+- 内联 text、JSON、image、PDF 文件输入
+- 显式提供时的 `max_output_tokens`
 - `temperature`
 - `top_p`
 - `stop`
-- `text.format` and legacy `response_format`
-- best-effort `text.verbosity`
-- `prompt_cache_key` response-context retention
-- proxy-side enforcement for `parallel_tool_calls: false`
+- `text.format` 和旧版 `response_format`
+- best-effort 的 `text.verbosity`
+- `prompt_cache_key` 响应上下文保留
+- 对 `parallel_tool_calls: false` 的代理侧约束
 - `reasoning.effort`
 - `reasoning.summary`
-- deprecated `reasoning.generate_summary`
-- streaming text deltas
-- streaming reasoning deltas
-- streaming tool argument deltas
-- SSE parsing with multiline `data:` support
+- 已废弃的 `reasoning.generate_summary`
+- 文本流式增量
+- reasoning 流式增量
+- 工具参数流式增量
+- 支持多行 `data:` 的 SSE 解析
 
-Explicitly unsupported today:
+当前明确不支持：
 
 - `background`
 - `store=true`
 - `previous_response_id`
-- `truncation` values other than `disabled`
+- 非 `disabled` 的 `truncation`
 - `max_tool_calls`
 - `item_reference`
 - `conversation`
@@ -200,43 +231,43 @@ Explicitly unsupported today:
 - `service_tier`
 - `input_file.file_id`
 - `input_image.file_id`
-- `input_image.detail` values other than `auto`
-- remote text-file fetching and most non-text/non-image/non-PDF file media types
-- hosted and remote OpenAI tools such as `file_search`, `web_search`, `computer_use`, `code_interpreter`, and `mcp`
-- full OpenAI reasoning replay semantics
-- non-empty `include`
-- all `top_logprobs` requests
-- custom tool grammars with `syntax: "lark"`
-- annotations and citations style response extras
+- 非 `auto` 的 `input_image.detail`
+- 远程文本文件抓取和大多数非文本/非图片/非 PDF 文件类型
+- `file_search`、`web_search`、`computer_use`、`code_interpreter`、`mcp` 等 hosted / remote OpenAI tools
+- 完整 OpenAI reasoning replay 语义
+- 非空 `include`
+- 所有 `top_logprobs`
+- `syntax: "lark"` 的 custom tool grammar
+- annotations / citations 一类响应增强字段
 
-Compatibility notes:
+兼容性说明：
 
-- assistant `phase` is bridged proxy-side rather than preserved as a native upstream field
-- `commentary` is translated onto Anthropic `thinking` blocks
-- `output_text` only reflects assistant `final_answer` text
-- function tools with `strict=false` are accepted for Codex compatibility but not enforced upstream
-- malformed request shapes are rejected locally instead of being silently normalized
+- assistant `phase` 目前是代理层 bridge，不是原样上游字段保留
+- `commentary` 会映射成 Anthropic `thinking`
+- `output_text` 只反映 assistant `final_answer` 文本
+- function tools 的 `strict=false` 为 Codex 兼容而接受，但不会被上游强制执行
+- 非法请求形状会在本地直接拒绝，而不是静默规范化
 
-## Security Notes
+## 安全说明
 
-- `.env` is ignored by git and should never be committed
-- `last_request.json` is ignored by git and may contain request payloads from local debugging
-- keep local secret files at restrictive permissions such as `chmod 600 .env last_request.json`
-- rotate provider keys before publishing if a real key was ever used outside ignored files
-- review your git author identity before pushing to a public remote
+- `.env` 已被 git 忽略，不应提交
+- `last_request.json` 已被 git 忽略，可能包含本地调试请求内容
+- 建议把本地敏感文件权限收紧为 `chmod 600 .env last_request.json`
+- 如果真实 key 曾经出现在忽略文件之外，公开发布前应先轮换
+- 推送到公开仓库前请检查 git 作者身份
 
-## Development
+## 开发
 
-Run the test suite:
+运行测试：
 
 ```bash
 .venv/bin/pytest -q
 ```
 
-## Repository
+## 仓库地址
 
 - GitHub: <https://github.com/ctyup879/any2response>
 
-## License
+## 开源协议
 
-This project is licensed under the MIT License. See [LICENSE](LICENSE).
+本项目采用 MIT License，详见 [LICENSE](LICENSE)。
