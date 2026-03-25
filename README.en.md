@@ -280,6 +280,7 @@ Supported today:
 - the proxy-local replay bridge for `include=["reasoning.encrypted_content"]`
 - `include=["web_search_call.action.sources"]`
 - Anthropic `web_search_result_location` / `search_result_location` citations mapped to Responses `url_citation`
+- Anthropic `char_location` / `page_location` / `content_block_location` citations mapped to Responses `file_citation` when a `file_id` is present
 - streaming text deltas
 - streaming reasoning deltas
 - streaming tool argument deltas
@@ -311,7 +312,7 @@ Explicitly unsupported today:
 - `include` values other than `reasoning.encrypted_content` and `web_search_call.action.sources`
 - all `top_logprobs` requests
 - custom tool grammars with `syntax: "lark"`
-- non-URL annotation / citation response extras such as document/page/file citations
+- document/page/content-block citations without a `file_id`, plus other response extras that cannot be mapped cleanly onto standard Responses annotations
 
 Compatibility notes:
 

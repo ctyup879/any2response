@@ -786,6 +786,62 @@ def test_translate_anthropic_web_search_stream_to_web_search_call_and_url_citati
     assert web_search_item["action"]["sources"] == [{"type": "url", "url": "https://en.wikipedia.org/wiki/Claude_Shannon"}]
 
 
+def test_translate_anthropic_stream_maps_file_backed_citations_to_file_annotations():
+    translator = ResponsesEventTranslator()
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_file_citation"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "The grass is green."},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {
+                "type": "citations_delta",
+                "citation": {
+                    "type": "char_location",
+                    "cited_text": "The grass is green.",
+                    "document_index": 0,
+                    "document_title": "example.txt",
+                    "start_char_index": 0,
+                    "end_char_index": 19,
+                    "file_id": "file_doc_123",
+                },
+            },
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"input_tokens": 1, "output_tokens": 1}},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    message_done = next(
+        event
+        for event in events
+        if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "message"
+    )
+
+    assert message_done["data"]["item"]["content"][0]["annotations"] == [
+        {
+            "type": "file_citation",
+            "file_id": "file_doc_123",
+            "filename": "example.txt",
+            "index": 0,
+        }
+    ]
+
+
 def test_translate_anthropic_shell_stream_preserves_environment_and_argument_payload():
     translator = ResponsesEventTranslator(
         response_context={"tools": [{"type": "shell", "name": "shell"}]},

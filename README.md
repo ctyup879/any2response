@@ -280,6 +280,7 @@ codex exec --profile m128py "Read README.md, then reply with only the first head
 - `include=["reasoning.encrypted_content"]` 的 proxy-local replay bridge
 - `include=["web_search_call.action.sources"]`
 - Anthropic `web_search_result_location` / `search_result_location` 到 Responses `url_citation` 的映射
+- 带 `file_id` 的 Anthropic `char_location` / `page_location` / `content_block_location` 到 Responses `file_citation` 的映射
 - 文本流式增量
 - reasoning 流式增量
 - 工具参数流式增量
@@ -311,7 +312,7 @@ codex exec --profile m128py "Read README.md, then reply with only the first head
 - 除 `reasoning.encrypted_content` 与 `web_search_call.action.sources` 之外的 `include` 值
 - 所有 `top_logprobs`
 - `syntax: "lark"` 的 custom tool grammar
-- 非 URL 型的 annotations / citations 响应增强字段，例如 document/page/file citations
+- 不带 `file_id` 的 document/page/content-block citations，以及其他无法稳定映射到标准 Responses annotation 的增强字段
 
 兼容性说明：
 

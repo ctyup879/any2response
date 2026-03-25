@@ -1504,6 +1504,42 @@ def test_translate_anthropic_response_maps_search_result_location_citations_to_u
     ]
 
 
+def test_translate_anthropic_response_maps_file_backed_citations_to_file_annotations():
+    translated = translate_anthropic_response(
+        {
+            "id": "msg_file_citation",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "The grass is green.",
+                    "citations": [
+                        {
+                            "type": "char_location",
+                            "cited_text": "The grass is green.",
+                            "document_index": 0,
+                            "document_title": "example.txt",
+                            "start_char_index": 0,
+                            "end_char_index": 19,
+                            "file_id": "file_doc_123",
+                        }
+                    ],
+                }
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+        "claude-sonnet-4-5",
+    )
+
+    assert translated["output"][0]["content"][0]["annotations"] == [
+        {
+            "type": "file_citation",
+            "file_id": "file_doc_123",
+            "filename": "example.txt",
+            "index": 0,
+        }
+    ]
+
+
 def test_translate_anthropic_response_rejects_unsupported_server_tool_use_blocks():
     with pytest.raises(UnsupportedFeatureError, match="server_tool_use"):
         translate_anthropic_response(

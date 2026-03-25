@@ -1382,6 +1382,21 @@ def _citation_annotation(text, citation):
     if not isinstance(citation, dict):
         return None
     citation_type = citation.get("type")
+    if citation_type in {"char_location", "page_location", "content_block_location"}:
+        file_id = citation.get("file_id") or citation.get("fileId")
+        if isinstance(file_id, str) and file_id:
+            annotation = {
+                "type": "file_citation",
+                "file_id": file_id,
+            }
+            document_title = citation.get("document_title") or citation.get("documentTitle")
+            if isinstance(document_title, str) and document_title.strip():
+                annotation["filename"] = document_title.strip()
+            document_index = citation.get("document_index")
+            if isinstance(document_index, int):
+                annotation["index"] = document_index
+            return annotation
+        return None
     url = None
     title = citation.get("title")
     if citation_type == "web_search_result_location":
@@ -1420,8 +1435,9 @@ def _offset_annotations(annotations, offset):
         if not isinstance(annotation, dict):
             continue
         item = dict(annotation)
-        item["start_index"] = int(item.get("start_index", 0)) + offset
-        item["end_index"] = int(item.get("end_index", 0)) + offset
+        if item.get("type") == "url_citation":
+            item["start_index"] = int(item.get("start_index", 0)) + offset
+            item["end_index"] = int(item.get("end_index", 0)) + offset
         adjusted.append(item)
     return adjusted
 
