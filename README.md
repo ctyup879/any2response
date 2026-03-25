@@ -157,7 +157,10 @@ Compatibility notes:
 - unsupported multimodal content inside tool outputs is rejected explicitly instead of being stringified.
 - orphan `tool_result` blocks are rejected explicitly instead of being silently filtered out.
 - malformed `tool_choice.allowed_tools` entries, unknown allowed tool names, and invalid scalar request controls are rejected locally before upstream dispatch.
-- invalid `stream` / `instructions` shapes are rejected locally instead of falling through to runtime type errors.
+- invalid `stream` shapes are rejected locally instead of falling through to runtime type errors.
+- `instructions` supports either a string or a list of Responses input items; invalid instruction item shapes are rejected locally.
 - non-object `tools` entries and non-object `input` items are rejected explicitly instead of being silently ignored or coerced.
-- non-object request bodies, invalid `model` values, and non-string `metadata` values are rejected locally before upstream dispatch.
+- non-object request bodies and invalid `model` values are rejected locally before upstream dispatch.
+- `metadata` now follows the documented OpenAI scalar value types (`string`/`number`/`boolean`) and rejects out-of-range key/value counts and lengths locally.
 - malformed message content arrays and malformed tool-call payloads are rejected explicitly instead of being stringified or wrapped into proxy-invented objects.
+- non-built-in function/custom tool outputs must be strings or valid multimodal content arrays, matching the documented Responses schema.

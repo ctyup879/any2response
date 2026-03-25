@@ -29,7 +29,7 @@ def test_translate_responses_request_to_anthropic_messages():
             {
                 "type": "function_call_output",
                 "call_id": "call_1",
-                "output": {"status": "ok"},
+                "output": "{\"status\":\"ok\"}",
             },
         ],
         "tools": [
@@ -64,7 +64,7 @@ def test_translate_responses_request_to_anthropic_messages():
         },
         {
             "role": "user",
-            "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": '{"status": "ok"}'}],
+            "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "{\"status\":\"ok\"}"}],
         },
     ]
     assert translated["tools"] == [
@@ -652,12 +652,12 @@ def test_translate_responses_request_groups_consecutive_tool_results():
             {
                 "type": "function_call_output",
                 "call_id": "call_1",
-                "output": {"ok": 1},
+                "output": "{\"ok\":1}",
             },
             {
                 "type": "function_call_output",
                 "call_id": "call_2",
-                "output": {"ok": 2},
+                "output": "{\"ok\":2}",
             },
         ],
     }
@@ -675,8 +675,8 @@ def test_translate_responses_request_groups_consecutive_tool_results():
         {
             "role": "user",
             "content": [
-                {"type": "tool_result", "tool_use_id": "call_1", "content": '{"ok": 1}'},
-                {"type": "tool_result", "tool_use_id": "call_2", "content": '{"ok": 2}'},
+                {"type": "tool_result", "tool_use_id": "call_1", "content": "{\"ok\":1}"},
+                {"type": "tool_result", "tool_use_id": "call_2", "content": "{\"ok\":2}"},
             ],
         }
     ]
@@ -1092,12 +1092,12 @@ def test_translate_responses_request_rejects_orphan_tool_results():
             {
                 "type": "function_call_output",
                 "call_id": "call_missing",
-                "output": {"bad": True},
+                "output": "{\"bad\":true}",
             },
             {
                 "type": "function_call_output",
                 "call_id": "call_ok",
-                "output": {"good": True},
+                "output": "{\"good\":true}",
             },
         ],
     }
@@ -2130,6 +2130,84 @@ def test_translate_responses_request_rejects_non_string_instructions():
         )
 
 
+def test_translate_responses_request_supports_instruction_item_lists():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "instructions": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "Follow repo rules."}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "Planning first."}],
+                },
+            ],
+            "input": "hello",
+        }
+    )
+
+    response_context = build_response_context(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "instructions": [
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{"type": "input_text", "text": "Follow repo rules."}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "phase": "commentary",
+                    "content": [{"type": "output_text", "text": "Planning first."}],
+                },
+            ],
+            "input": "hello",
+        }
+    )
+
+    assert translated["system"] == "Follow repo rules."
+    assert translated["messages"] == [
+        {
+            "role": "assistant",
+            "content": [{"type": "thinking", "thinking": "Planning first."}],
+        },
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "hello"}],
+        },
+    ]
+    assert response_context["instructions"] == [
+        {
+            "type": "message",
+            "role": "developer",
+            "content": [{"type": "input_text", "text": "Follow repo rules."}],
+        },
+        {
+            "type": "message",
+            "role": "assistant",
+            "phase": "commentary",
+            "content": [{"type": "output_text", "text": "Planning first."}],
+        },
+    ]
+
+
+def test_translate_responses_request_rejects_non_object_instruction_items():
+    with pytest.raises(UnsupportedFeatureError, match="instructions"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "instructions": ["bad"],
+                "input": "hello",
+            }
+        )
+
+
 def test_translate_responses_request_rejects_non_object_tool_entries():
     with pytest.raises(UnsupportedFeatureError, match="tools"):
         translate_responses_request(
@@ -2183,6 +2261,72 @@ def test_translate_responses_request_rejects_non_string_metadata_values():
         )
 
 
+def test_translate_responses_request_accepts_string_number_and_boolean_metadata_values():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "metadata": {
+                "request_id": "abc",
+                "attempt": 2,
+                "cached": True,
+            },
+        }
+    )
+
+    response_context = build_response_context(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "metadata": {
+                "request_id": "abc",
+                "attempt": 2,
+                "cached": True,
+            },
+        }
+    )
+
+    assert translated["model"] == "codex-MiniMax-M2.7"
+    assert response_context["metadata"] == {
+        "request_id": "abc",
+        "attempt": 2,
+        "cached": True,
+    }
+
+
+def test_translate_responses_request_rejects_metadata_with_too_many_pairs():
+    with pytest.raises(UnsupportedFeatureError, match="metadata"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "metadata": {f"k{i}": "v" for i in range(17)},
+            }
+        )
+
+
+def test_translate_responses_request_rejects_metadata_key_length_over_limit():
+    with pytest.raises(UnsupportedFeatureError, match="metadata"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "metadata": {"k" * 65: "v"},
+            }
+        )
+
+
+def test_translate_responses_request_rejects_metadata_string_value_length_over_limit():
+    with pytest.raises(UnsupportedFeatureError, match="metadata"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "metadata": {"request_id": "v" * 513},
+            }
+        )
+
+
 @pytest.mark.parametrize(
     "content",
     [
@@ -2229,6 +2373,55 @@ def test_translate_responses_request_rejects_invalid_function_call_arguments(ite
             {
                 "model": "codex-MiniMax-M2.7",
                 "input": [item],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_object_function_call_output_payloads():
+    with pytest.raises(UnsupportedFeatureError, match="tool call output"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": {"status": "ok"},
+                    }
+                ],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_object_custom_tool_call_output_payloads():
+    with pytest.raises(UnsupportedFeatureError, match="tool call output"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "custom_tool_call_output",
+                        "call_id": "call_1",
+                        "output": {"status": "ok"},
+                    }
+                ],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_non_string_custom_tool_call_input():
+    with pytest.raises(UnsupportedFeatureError, match="custom tool input"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "custom_tool_call",
+                        "call_id": "call_patch",
+                        "name": "apply_patch",
+                        "input": {"patch": "*** Begin Patch"},
+                    }
+                ],
             }
         )
 

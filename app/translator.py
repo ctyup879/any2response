@@ -186,11 +186,25 @@ def _normalize_metadata(value):
         return {}
     if not isinstance(value, dict):
         raise UnsupportedFeatureError("Unsupported Responses API feature: metadata is not supported")
+    if len(value) > 16:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: metadata is not supported")
     if any(not isinstance(key, str) for key in value):
         raise UnsupportedFeatureError("Unsupported Responses API feature: metadata is not supported")
-    if any(not isinstance(item, str) for item in value.values()):
+    normalized = {}
+    for key, item in value.items():
+        if len(key) > 64:
+            raise UnsupportedFeatureError("Unsupported Responses API feature: metadata is not supported")
+        if isinstance(item, bool):
+            normalized[key] = item
+            continue
+        if isinstance(item, (int, float)):
+            normalized[key] = item
+            continue
+        if isinstance(item, str) and len(item) <= 512:
+            normalized[key] = item
+            continue
         raise UnsupportedFeatureError("Unsupported Responses API feature: metadata is not supported")
-    return value
+    return normalized
 
 
 def _normalize_user(value):
@@ -213,7 +227,8 @@ def _normalize_instructions(value):
     if value is None:
         return None
     if not isinstance(value, str):
-        raise UnsupportedFeatureError("Unsupported Responses API feature: instructions is not supported")
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            raise UnsupportedFeatureError("Unsupported Responses API feature: instructions is not supported")
     return value
 
 
@@ -487,6 +502,14 @@ def _translate_tool_result_content(value):
             return _translate_content_blocks([value])
         return _stringify(value)
     return _stringify(value)
+
+
+def _normalize_tool_call_output_value(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return _translate_content_blocks(value)
+    raise UnsupportedFeatureError("Unsupported Responses API feature: tool call output is not supported")
 
 
 def _builtin_tool_description(tool_type, description, environment=None):
@@ -991,13 +1014,11 @@ def _normalize_response_tools(tools):
 
 
 def _custom_tool_input_value(value):
-    if isinstance(value, dict) and set(value) == {"input"} and isinstance(value.get("input"), str):
-        return value["input"]
     if isinstance(value, str):
         return value
     if value is None:
         return ""
-    return _stringify(value)
+    raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool input is not supported")
 
 
 def _custom_tool_payload(value):
@@ -1380,7 +1401,8 @@ def translate_responses_request(body):
         result["thinking"] = thinking
 
     system_segments = []
-    if instructions:
+    instruction_items = instructions if isinstance(instructions, list) else []
+    if isinstance(instructions, str) and instructions:
         system_segments.append(instructions)
     text_format_instruction = _text_format_instruction(body)
     if text_format_instruction:
@@ -1464,7 +1486,7 @@ def translate_responses_request(body):
             result["messages"].append({"role": "user", "content": list(pending_tool_result_blocks)})
             pending_tool_result_blocks.clear()
 
-    for item in _iter_input_items(body.get("input", [])):
+    for item in [*instruction_items, *_iter_input_items(body.get("input", []))]:
         if not isinstance(item, dict):
             raise UnsupportedFeatureError("Unsupported Responses API feature: input items are not supported")
 
@@ -1557,7 +1579,7 @@ def translate_responses_request(body):
             content = (
                 _builtin_tool_output_content(item)
                 if item_type in {"apply_patch_call_output", "shell_call_output"}
-                else _translate_tool_result_content(item.get("output", ""))
+                else _normalize_tool_call_output_value(item.get("output", ""))
             )
             tool_result = {
                 "type": "tool_result",
