@@ -165,23 +165,30 @@ def test_translate_responses_request_rejects_lark_custom_tool_format():
         )
 
 
-def test_translate_responses_request_rejects_nameless_hosted_tools():
-    with pytest.raises(UnsupportedFeatureError, match="tool type"):
-        translate_responses_request(
-            {
-                "model": "codex-MiniMax-M2.7",
-                "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
-                "tools": [
-                    {"type": "web_search"},
-                    {
-                        "type": "function",
-                        "name": "echo",
-                        "description": "Echo input",
-                        "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
-                    },
-                ],
-            }
-        )
+def test_translate_responses_request_ignores_nameless_hosted_tools_when_mixed_with_supported_tools():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+            "tools": [
+                {"type": "web_search"},
+                {
+                    "type": "function",
+                    "name": "echo",
+                    "description": "Echo input",
+                    "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
+                },
+            ],
+        }
+    )
+
+    assert translated["tools"] == [
+        {
+            "name": "echo",
+            "description": "Echo input",
+            "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}},
+        }
+    ]
 
 
 def test_translate_responses_request_rejects_function_tool_without_name():
@@ -1599,6 +1606,47 @@ def test_build_response_context_rejects_unsupported_tool_type_even_without_name(
         )
 
 
+def test_translate_responses_request_ignores_unselected_unnamed_hosted_tools():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "tools": [
+                {"type": "function", "name": "exec_command", "parameters": {"type": "object"}},
+                {"type": "web_search", "external_web_access": True},
+            ],
+            "tool_choice": "auto",
+        }
+    )
+
+    assert translated["tools"] == [
+        {"name": "exec_command", "description": "", "input_schema": {"type": "object"}}
+    ]
+
+
+def test_build_response_context_ignores_unselected_unnamed_hosted_tools():
+    response_context = build_response_context(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "tools": [
+                {"type": "function", "name": "exec_command", "parameters": {"type": "object"}},
+                {"type": "web_search", "external_web_access": True},
+            ],
+            "tool_choice": "auto",
+        }
+    )
+
+    assert response_context["tools"] == [
+        {
+            "type": "function",
+            "name": "exec_command",
+            "parameters": {"type": "object"},
+            "strict": True,
+        }
+    ]
+
+
 def test_translate_responses_request_rejects_nonzero_top_logprobs():
     with pytest.raises(UnsupportedFeatureError, match="top_logprobs"):
         translate_responses_request(
@@ -1817,6 +1865,44 @@ def test_translate_responses_request_rejects_input_image_file_id():
         )
 
 
+def test_translate_responses_request_rejects_invalid_base64_input_image():
+    with pytest.raises(UnsupportedFeatureError, match="input_image source"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_image", "image_url": "data:image/png;base64,***"}],
+                    }
+                ],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_invalid_base64_input_file():
+    with pytest.raises(UnsupportedFeatureError, match="input_file source"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_file",
+                                "filename": "doc.pdf",
+                                "file_data": "data:application/pdf;base64,***",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+
 def test_translate_responses_request_rejects_invalid_shell_tool_environment_shape():
     with pytest.raises(UnsupportedFeatureError, match="shell environment"):
         translate_responses_request(
@@ -1915,6 +2001,28 @@ def test_translate_responses_request_supports_inline_json_file_content():
             ],
         }
     ]
+
+
+def test_translate_responses_request_rejects_non_utf8_inline_text_file_content():
+    with pytest.raises(UnsupportedFeatureError, match="input_file source"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_file",
+                                "filename": "notes.txt",
+                                "file_data": "data:text/plain,%FF",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
 
 
 def test_translate_responses_request_supports_text_format_and_sampling_controls():
@@ -2069,6 +2177,68 @@ def test_translate_responses_request_supports_embedded_tool_blocks():
     ]
 
 
+def test_translate_responses_request_rejects_embedded_tool_use_without_id():
+    with pytest.raises(UnsupportedFeatureError, match="tool call call_id"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "tool_use", "name": "lookup_weather", "input": {"city": "Shanghai"}},
+                        ],
+                    }
+                ],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_embedded_tool_result_with_non_string_tool_use_id():
+    with pytest.raises(UnsupportedFeatureError, match="tool_result tool_use_id"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": 123,
+                                "content": "ok",
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_embedded_tool_result_with_invalid_content_shape():
+    with pytest.raises(UnsupportedFeatureError, match="tool_result content"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": "call_1",
+                                "content": {"status": "ok"},
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+
+
 def test_translate_anthropic_response_maps_thinking_to_reasoning_output():
     body = {
         "id": "msg_reasoning",
@@ -2091,6 +2261,18 @@ def test_translate_anthropic_response_maps_thinking_to_reasoning_output():
     assert translated["output"][1]["type"] == "message"
 
 
+def test_translate_anthropic_response_rejects_tool_use_without_call_id():
+    with pytest.raises(UnsupportedFeatureError, match="tool call call_id"):
+        translate_anthropic_response(
+            {
+                "id": "msg_tool_use",
+                "content": [{"type": "tool_use", "name": "lookup_weather", "input": {"city": "Shanghai"}}],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            },
+            "codex-MiniMax-M2.7",
+        )
+
+
 def test_translate_responses_request_supports_allowed_tools_tool_choice():
     request_body = {
         "model": "codex-MiniMax-M2.7",
@@ -2110,6 +2292,83 @@ def test_translate_responses_request_supports_allowed_tools_tool_choice():
 
     assert translated["tools"] == [
         {"name": "search_docs", "description": "", "input_schema": {"type": "object"}}
+    ]
+    assert translated["tool_choice"] == {"type": "any"}
+
+
+def test_translate_responses_request_supports_builtin_allowed_tools_without_explicit_name():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "tools": [
+                {"type": "shell"},
+                {"type": "apply_patch"},
+            ],
+            "tool_choice": {
+                "type": "allowed_tools",
+                "mode": "required",
+                "tools": [{"type": "shell"}],
+            },
+        }
+    )
+
+    assert translated["tools"] == [
+        {
+            "name": "shell",
+            "description": "",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "object",
+                        "properties": {
+                            "commands": {"type": "array", "items": {"type": "string"}},
+                            "timeout_ms": {"type": "integer"},
+                            "max_output_length": {"type": "integer"},
+                        },
+                        "required": ["commands"],
+                        "additionalProperties": False,
+                    },
+                    "environment": {
+                        "oneOf": [
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"const": "local"},
+                                    "skills": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "name": {"type": "string"},
+                                                "path": {"type": "string"},
+                                                "description": {"type": "string"},
+                                            },
+                                            "required": ["name", "path"],
+                                            "additionalProperties": False,
+                                        },
+                                    },
+                                },
+                                "required": ["type"],
+                                "additionalProperties": False,
+                            },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "type": {"const": "container_reference"},
+                                    "container_id": {"type": "string"},
+                                },
+                                "required": ["type", "container_id"],
+                                "additionalProperties": False,
+                            },
+                        ]
+                    },
+                },
+                "required": ["action"],
+                "additionalProperties": False,
+            },
+        }
     ]
     assert translated["tool_choice"] == {"type": "any"}
 
@@ -2333,6 +2592,47 @@ def test_translate_responses_request_rejects_non_string_metadata_values():
                 "model": "codex-MiniMax-M2.7",
                 "input": "hello",
                 "metadata": {"request_id": {"nested": "bad"}},
+            }
+        )
+
+
+@pytest.mark.parametrize("field_name", ["temperature", "top_p"])
+def test_translate_responses_request_rejects_non_finite_sampling_values(field_name):
+    with pytest.raises(UnsupportedFeatureError, match=field_name):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                field_name: float("nan"),
+            }
+        )
+
+    with pytest.raises(UnsupportedFeatureError, match=field_name):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                field_name: float("inf"),
+            }
+        )
+
+
+def test_translate_responses_request_rejects_non_finite_metadata_numbers():
+    with pytest.raises(UnsupportedFeatureError, match="metadata"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "metadata": {"score": float("nan")},
+            }
+        )
+
+    with pytest.raises(UnsupportedFeatureError, match="metadata"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "metadata": {"score": float("inf")},
             }
         )
 

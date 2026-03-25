@@ -302,6 +302,7 @@ codex exec --profile m128py "Read README.md, then reply with only the first head
 - `commentary` 会映射成 Anthropic `thinking`
 - `output_text` 只反映 assistant `final_answer` 文本
 - function tools 的 `strict=false` 为 Codex 兼容而接受，但不会被上游强制执行
+- Codex 默认注入且未显式选中的 unnamed hosted tools（例如 `web_search`）会在本地被过滤，不会转发到上游
 - 非法请求形状会在本地直接拒绝，而不是静默规范化
 
 ## 安全说明

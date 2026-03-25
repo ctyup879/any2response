@@ -779,6 +779,21 @@ def test_translate_anthropic_stream_completed_includes_usage_details():
     assert completed["data"]["response"]["usage"]["output_tokens_details"] == {"reasoning_tokens": 0}
 
 
+def test_translate_anthropic_stream_rejects_tool_use_without_call_id():
+    translator = ResponsesEventTranslator(response_context={})
+
+    translator.feed({"type": "message_start", "message": {"id": "msg_stream"}})
+
+    with pytest.raises(UnsupportedFeatureError, match="tool call call_id"):
+        translator.feed(
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "name": "lookup_weather", "input": {"city": "Shanghai"}},
+            }
+        )
+
+
 def test_translate_anthropic_stream_omits_logprobs_when_not_requested():
     translator = ResponsesEventTranslator()
     events = []

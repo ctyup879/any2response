@@ -1,5 +1,7 @@
 import base64
+import binascii
 import json
+import math
 import mimetypes
 import re
 import secrets
@@ -19,6 +21,16 @@ UNSUPPORTED_REQUEST_FIELDS = {
     "prompt_cache_retention",
     "safety_identifier",
     "service_tier",
+}
+
+IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES = {
+    "web_search",
+    "web_search_preview",
+    "file_search",
+    "computer_use",
+    "computer_use_preview",
+    "code_interpreter",
+    "image_generation",
 }
 
 
@@ -94,12 +106,30 @@ def _is_textual_media_type(media_type):
     }
 
 
+def _validate_data_url_base64(parsed, error_message):
+    if not parsed or not parsed.get("is_base64"):
+        return
+    try:
+        base64.b64decode(parsed.get("data", ""), validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise UnsupportedFeatureError(error_message) from exc
+
+
 def _decode_data_url_text(parsed):
     data = parsed.get("data", "")
     if parsed.get("is_base64"):
-        raw = base64.b64decode(data)
-        return raw.decode("utf-8")
-    return urllib.parse.unquote_to_bytes(data).decode("utf-8")
+        try:
+            raw = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise UnsupportedFeatureError("Unsupported input_file source") from exc
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise UnsupportedFeatureError("Unsupported input_file source") from exc
+    try:
+        return urllib.parse.unquote_to_bytes(data).decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise UnsupportedFeatureError("Unsupported input_file source") from exc
 
 
 def _translate_image_block(item):
@@ -112,6 +142,7 @@ def _translate_image_block(item):
     if parsed:
         if not parsed["media_type"].startswith("image/"):
             raise UnsupportedFeatureError(f"Unsupported image media type: {parsed['media_type']}")
+        _validate_data_url_base64(parsed, "Unsupported input_image source")
         return {
             "type": "image",
             "source": {
@@ -139,10 +170,14 @@ def _normalize_max_output_tokens(value):
     return value
 
 
+def _is_finite_number(value):
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+
+
 def _normalize_temperature(value):
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not _is_finite_number(value):
         raise UnsupportedFeatureError("Unsupported Responses API feature: temperature is not supported")
     if value < 0 or value > 2:
         raise UnsupportedFeatureError("Unsupported Responses API feature: temperature is not supported")
@@ -152,7 +187,7 @@ def _normalize_temperature(value):
 def _normalize_top_p(value):
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if not _is_finite_number(value):
         raise UnsupportedFeatureError("Unsupported Responses API feature: top_p is not supported")
     if value < 0 or value > 1:
         raise UnsupportedFeatureError("Unsupported Responses API feature: top_p is not supported")
@@ -195,7 +230,7 @@ def _normalize_metadata(value):
         if isinstance(item, bool):
             normalized[key] = item
             continue
-        if isinstance(item, (int, float)):
+        if _is_finite_number(item):
             normalized[key] = item
             continue
         if isinstance(item, str) and len(item) <= 512:
@@ -408,6 +443,7 @@ def _translate_file_block(item):
     parsed = _parse_data_url(file_value)
 
     if parsed:
+        _validate_data_url_base64(parsed, "Unsupported input_file source")
         media_type = parsed["media_type"]
         source = {"type": "base64", "media_type": media_type, "data": parsed["data"]}
     elif isinstance(file_value, str) and file_value.startswith(("http://", "https://")):
@@ -467,23 +503,30 @@ def _translate_content_blocks(content):
             name = (item.get("name") or "").strip()
             if not name:
                 raise UnsupportedFeatureError("Unsupported Responses API feature: tool call name is required")
+            call_id = item.get("id")
+            if call_id is None:
+                call_id = item.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: tool call call_id is required")
+            input_value = item["input"] if "input" in item else item.get("arguments")
             blocks.append(
                 {
                     "type": "tool_use",
-                    "id": item.get("id") or item.get("call_id", f"call_{uuid.uuid4().hex[:8]}"),
+                    "id": call_id,
                     "name": name,
-                    "input": _parse_tool_call_arguments(item.get("input", item.get("arguments"))),
+                    "input": _parse_tool_call_arguments(input_value),
                 }
             )
             continue
         if item_type == "tool_result":
-            tool_use_id = item.get("tool_use_id") or item.get("call_id")
-            if not tool_use_id:
+            tool_use_id = item.get("tool_use_id") if "tool_use_id" in item else item.get("call_id")
+            if not isinstance(tool_use_id, str) or not tool_use_id:
                 raise UnsupportedFeatureError("Unsupported Responses API feature: tool_result tool_use_id is required")
+            content_value = item.get("content") if "content" in item else item.get("output", "")
             block = {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
-                "content": item.get("content", item.get("output", "")),
+                "content": _translate_tool_result_content(content_value),
             }
             if item.get("is_error") is True:
                 block["is_error"] = True
@@ -496,13 +539,15 @@ def _translate_content_blocks(content):
 
 
 def _translate_tool_result_content(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
     if isinstance(value, list):
         return _translate_content_blocks(value)
-    if isinstance(value, dict):
-        if value.get("type"):
-            return _translate_content_blocks([value])
-        return _stringify(value)
-    return _stringify(value)
+    if isinstance(value, dict) and value.get("type"):
+        return _translate_content_blocks([value])
+    raise UnsupportedFeatureError("Unsupported Responses API feature: tool_result content is not supported")
 
 
 def _normalize_tool_call_output_value(value):
@@ -574,12 +619,15 @@ def _parse_apply_patch_operation(value):
 def _translate_tools(tools):
     if tools is not None and not isinstance(tools, list):
         raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
+    total_tools = len(tools or [])
     translated = []
     for tool in tools or []:
         if not isinstance(tool, dict):
             raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
         tool_type = tool.get("type")
         tool_name = tool.get("name") or tool.get("function", {}).get("name", "")
+        if tool_type in IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES and not tool_name and total_tools > 1:
+            continue
         if tool_type not in {None, "function", "custom", "apply_patch", "shell"}:
             raise UnsupportedFeatureError(
                 f"Unsupported Responses API tool type: {tool_type}"
@@ -993,12 +1041,16 @@ def _reasoning_input_text(item):
 def _normalize_response_tools(tools):
     if tools is not None and not isinstance(tools, list):
         raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
+    total_tools = len(tools or [])
     normalized = []
     for tool in tools or []:
         if not isinstance(tool, dict):
             raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
         normalized_tool = dict(tool)
         tool_type = normalized_tool.get("type")
+        tool_name = normalized_tool.get("name") or normalized_tool.get("function", {}).get("name", "")
+        if tool_type in IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES and not tool_name and total_tools > 1:
+            continue
         if tool_type not in {None, "function", "custom", "apply_patch", "shell"}:
             raise UnsupportedFeatureError(f"Unsupported Responses API tool type: {tool_type}")
         if tool_type in {"apply_patch", "shell"} and not normalized_tool.get("name"):
@@ -1221,6 +1273,8 @@ def _allowed_tool_names(tool_choice):
         if not isinstance(tool, dict):
             raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.allowed_tools is not supported")
         name = tool.get("name") or tool.get("function", {}).get("name", "")
+        if not name and tool.get("type") in {"apply_patch", "shell"}:
+            name = tool["type"]
         if not isinstance(name, str) or not name.strip():
             raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.allowed_tools is not supported")
         names.append(name.strip())
@@ -1712,11 +1766,17 @@ def translate_anthropic_response(body, model, response_context=None):
                 raise UnsupportedFeatureError(
                     "Unsupported Responses API behavior: parallel_tool_calls=false cannot accept multiple tool calls"
                 )
+            call_id = block.get("id")
+            if not isinstance(call_id, str) or not call_id:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: tool call call_id is required")
+            name = block.get("name")
+            if not isinstance(name, str) or not name:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: tool call name is required")
             tool_call_seen = True
             output.append(
                 _tool_item_payload(
-                    block.get("id", ""),
-                    block.get("name", ""),
+                    call_id,
+                    name,
                     json.dumps(block.get("input", {}), ensure_ascii=False),
                     "completed",
                     response_context=response_context,
@@ -2267,8 +2327,12 @@ class ResponsesEventTranslator:
                     raise UnsupportedFeatureError(
                         "Unsupported Responses API behavior: parallel_tool_calls=false cannot accept multiple tool calls"
                     )
-                call_id = block.get("id", f"call_{uuid.uuid4().hex[:8]}")
-                name = block.get("name", "")
+                call_id = block.get("id")
+                if not isinstance(call_id, str) or not call_id:
+                    raise UnsupportedFeatureError("Unsupported Responses API feature: tool call call_id is required")
+                name = block.get("name")
+                if not isinstance(name, str) or not name:
+                    raise UnsupportedFeatureError("Unsupported Responses API feature: tool call name is required")
                 output_index = self._tool_output_index(index)
                 self.tool_calls[index] = {"call_id": call_id, "name": name, "output_index": output_index}
                 self.tool_args[index] = ""

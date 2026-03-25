@@ -58,7 +58,10 @@ def create_app(settings_override=None, upstream_client=None):
         if _extract_api_key(request) != settings.proxy_api_key:
             return _error_response(401, "Unauthorized", "authentication_error")
 
-        body = await request.json()
+        try:
+            body = await request.json()
+        except json.JSONDecodeError:
+            return _error_response(400, "Invalid JSON request body")
         _write_last_request(body, settings.request_log_path)
         try:
             translated = translate_responses_request(body)

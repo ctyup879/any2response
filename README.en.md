@@ -302,6 +302,7 @@ Compatibility notes:
 - `commentary` is translated onto Anthropic `thinking` blocks
 - `output_text` only reflects assistant `final_answer` text
 - function tools with `strict=false` are accepted for Codex compatibility but not enforced upstream
+- Codex-injected unnamed hosted tools that are not explicitly selected, such as `web_search`, are filtered locally instead of being forwarded upstream
 - malformed request shapes are rejected locally instead of being silently normalized
 
 ## Security Notes

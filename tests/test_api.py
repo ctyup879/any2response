@@ -332,3 +332,27 @@ def test_post_responses_rejects_non_object_request_body():
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "unsupported_feature"
     assert "request body" in response.json()["error"]["message"]
+
+
+def test_post_responses_rejects_invalid_json_body():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/responses",
+        headers={
+            "Authorization": "Bearer proxy-secret",
+            "Content-Type": "application/json",
+        },
+        content="{",
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "invalid_request_error"
+    assert "Invalid JSON" in response.json()["error"]["message"]
