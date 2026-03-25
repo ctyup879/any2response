@@ -37,6 +37,18 @@ def _stringify(value):
     return json.dumps(value, ensure_ascii=False)
 
 
+def _require_request_object(body):
+    if not isinstance(body, dict):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: request body is not supported")
+    return body
+
+
+def _normalize_model(value):
+    if not isinstance(value, str) or not value.strip():
+        raise UnsupportedFeatureError("Unsupported Responses API feature: model is not supported")
+    return value
+
+
 def _parse_jsonish(value):
     if isinstance(value, dict):
         return value
@@ -175,6 +187,8 @@ def _normalize_metadata(value):
     if not isinstance(value, dict):
         raise UnsupportedFeatureError("Unsupported Responses API feature: metadata is not supported")
     if any(not isinstance(key, str) for key in value):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: metadata is not supported")
+    if any(not isinstance(item, str) for item in value.values()):
         raise UnsupportedFeatureError("Unsupported Responses API feature: metadata is not supported")
     return value
 
@@ -403,13 +417,12 @@ def _translate_content_blocks(content):
         return [{"type": "text", "text": content}]
 
     if not isinstance(content, list):
-        return [{"type": "text", "text": _stringify(content)}]
+        raise UnsupportedFeatureError("Unsupported Responses API feature: message content is not supported")
 
     blocks = []
     for item in content:
         if not isinstance(item, dict):
-            blocks.append({"type": "text", "text": _stringify(item)})
-            continue
+            raise UnsupportedFeatureError("Unsupported Responses API feature: message content is not supported")
 
         item_type = item.get("type")
         if item_type in {"input_text", "output_text", "text"}:
@@ -443,7 +456,7 @@ def _translate_content_blocks(content):
                     "type": "tool_use",
                     "id": item.get("id") or item.get("call_id", f"call_{uuid.uuid4().hex[:8]}"),
                     "name": name,
-                    "input": _parse_jsonish(item.get("input", item.get("arguments"))),
+                    "input": _parse_tool_call_arguments(item.get("input", item.get("arguments"))),
                 }
             )
             continue
@@ -500,6 +513,38 @@ def _normalize_function_parameters(tool):
     if not isinstance(parameters, dict):
         raise UnsupportedFeatureError("Unsupported Responses API feature: tool parameters must be an object")
     return parameters
+
+
+def _parse_tool_call_arguments(value):
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise UnsupportedFeatureError(
+                "Unsupported Responses API feature: tool call arguments are not supported"
+            ) from exc
+        if isinstance(parsed, dict):
+            return parsed
+    raise UnsupportedFeatureError("Unsupported Responses API feature: tool call arguments are not supported")
+
+
+def _parse_apply_patch_operation(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise UnsupportedFeatureError(
+                "Unsupported Responses API feature: apply_patch_call.operation is not supported"
+            ) from exc
+        if isinstance(parsed, dict):
+            return parsed
+    raise UnsupportedFeatureError("Unsupported Responses API feature: apply_patch_call.operation is not supported")
 
 
 def _translate_tools(tools):
@@ -669,13 +714,19 @@ def _normalize_shell_action(action, payload=None):
         commands = [commands]
     if commands is not None and not isinstance(commands, list):
         raise UnsupportedFeatureError("Unsupported Responses API feature: shell_call.action.commands is not supported")
+    if isinstance(commands, list) and any(not isinstance(command, str) for command in commands):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: shell_call.action.commands is not supported")
 
     normalized = {}
     if isinstance(commands, list):
-        normalized["commands"] = [str(command) for command in commands]
+        normalized["commands"] = list(commands)
     for field_name in ("timeout_ms", "max_output_length"):
         value = action.get(field_name)
         if value is not None:
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise UnsupportedFeatureError(
+                    f"Unsupported Responses API feature: shell_call.action.{field_name} is not supported"
+                )
             normalized[field_name] = value
 
     if not normalized and payload is not None:
@@ -1058,6 +1109,7 @@ def _builtin_tool_output_is_error(item):
 
 
 def build_response_context(body, model=None):
+    body = _require_request_object(body)
     stream = _normalize_stream(body.get("stream"))
     instructions = _normalize_instructions(body.get("instructions"))
     text_config = body.get("text")
@@ -1072,7 +1124,7 @@ def build_response_context(body, model=None):
     reasoning = _normalize_reasoning_config(body.get("reasoning"))
 
     return {
-        "model": model or body.get("model"),
+        "model": _normalize_model(model if model is not None else body.get("model")),
         "instructions": instructions,
         "max_output_tokens": _normalize_max_output_tokens(body.get("max_output_tokens")),
         "metadata": _normalize_metadata(body.get("metadata")),
@@ -1285,6 +1337,7 @@ def _iter_input_items(raw_input):
 
 
 def translate_responses_request(body):
+    body = _require_request_object(body)
     _validate_supported_request_fields(body)
     _validate_request_scalar_fields(body)
     stream = _normalize_stream(body.get("stream"))
@@ -1305,7 +1358,7 @@ def translate_responses_request(body):
     _normalize_top_logprobs(body.get("top_logprobs"))
 
     result = {
-        "model": body.get("model"),
+        "model": _normalize_model(body.get("model")),
         "messages": [],
         "stream": stream,
     }
@@ -1465,7 +1518,7 @@ def translate_responses_request(body):
             if item_type == "custom_tool_call":
                 tool_input = _custom_tool_payload(item.get("input"))
             elif item_type == "apply_patch_call":
-                tool_input = {"operation": _parse_jsonish(item.get("operation"))}
+                tool_input = {"operation": _parse_apply_patch_operation(item.get("operation"))}
             elif item_type == "shell_call":
                 legacy_action = {}
                 if item.get("commands") is not None:
@@ -1479,7 +1532,7 @@ def translate_responses_request(body):
                 if shell_environment is not None:
                     tool_input["environment"] = shell_environment
             else:
-                tool_input = _parse_jsonish(item.get("arguments", item.get("input")))
+                tool_input = _parse_tool_call_arguments(item.get("arguments", item.get("input")))
             current_assistant_blocks.append(
                 {
                     "type": "tool_use",

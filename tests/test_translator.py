@@ -2161,6 +2161,110 @@ def test_translate_responses_request_rejects_scalar_input_values():
         )
 
 
+@pytest.mark.parametrize("model_value", [None, "", 123, True])
+def test_translate_responses_request_rejects_invalid_model(model_value):
+    with pytest.raises(UnsupportedFeatureError, match="model"):
+        translate_responses_request(
+            {
+                "model": model_value,
+                "input": "hello",
+            }
+        )
+
+
+def test_translate_responses_request_rejects_non_string_metadata_values():
+    with pytest.raises(UnsupportedFeatureError, match="metadata"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "metadata": {"request_id": {"nested": "bad"}},
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        123,
+        [{"type": "input_text", "text": "hi"}, 456],
+    ],
+)
+def test_translate_responses_request_rejects_invalid_message_content_shapes(content):
+    with pytest.raises(UnsupportedFeatureError, match="message content"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": content,
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "item",
+    [
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup_weather",
+            "arguments": "not-json",
+        },
+        {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "lookup_weather",
+            "arguments": "[1,2,3]",
+        },
+    ],
+)
+def test_translate_responses_request_rejects_invalid_function_call_arguments(item):
+    with pytest.raises(UnsupportedFeatureError, match="tool call arguments"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [item],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_invalid_apply_patch_operation_shape():
+    with pytest.raises(UnsupportedFeatureError, match="apply_patch_call.operation"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "apply_patch_call",
+                        "call_id": "call_patch",
+                        "operation": "replace this",
+                    }
+                ],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_non_string_shell_commands():
+    with pytest.raises(UnsupportedFeatureError, match="shell_call.action.commands"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "shell_call",
+                        "call_id": "call_shell",
+                        "action": {"commands": ["pwd", 123]},
+                    }
+                ],
+            }
+        )
+
+
 def test_translate_responses_request_supports_direct_tool_choice_shape():
     translated = translate_responses_request(
         {

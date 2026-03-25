@@ -281,3 +281,24 @@ def test_post_responses_rejects_zero_top_logprobs():
     assert response.status_code == 400
     assert response.json()["error"]["type"] == "unsupported_feature"
     assert "top_logprobs" in response.json()["error"]["message"]
+
+
+def test_post_responses_rejects_non_object_request_body():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json=["not", "an", "object"],
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "unsupported_feature"
+    assert "request body" in response.json()["error"]["message"]

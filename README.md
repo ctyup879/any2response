@@ -159,3 +159,5 @@ Compatibility notes:
 - malformed `tool_choice.allowed_tools` entries, unknown allowed tool names, and invalid scalar request controls are rejected locally before upstream dispatch.
 - invalid `stream` / `instructions` shapes are rejected locally instead of falling through to runtime type errors.
 - non-object `tools` entries and non-object `input` items are rejected explicitly instead of being silently ignored or coerced.
+- non-object request bodies, invalid `model` values, and non-string `metadata` values are rejected locally before upstream dispatch.
+- malformed message content arrays and malformed tool-call payloads are rejected explicitly instead of being stringified or wrapped into proxy-invented objects.
