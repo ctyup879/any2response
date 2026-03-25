@@ -1920,15 +1920,16 @@ def translate_anthropic_response(body, model, response_context=None):
                     status=reasoning_status,
                 )
             )
-            output.append(
-                _assistant_message_item_payload(
-                    f"msg_{response_id}_commentary_{index}",
-                    content_text,
-                    reasoning_status,
-                    phase="commentary",
-                    response_context=response_context,
+            if content_text:
+                output.append(
+                    _assistant_message_item_payload(
+                        f"msg_{response_id}_commentary_{index}",
+                        content_text,
+                        reasoning_status,
+                        phase="commentary",
+                        response_context=response_context,
+                    )
                 )
-            )
         elif block_type == "text":
             text = block.get("text", "")
             final_text_parts.append(text)
@@ -2493,24 +2494,29 @@ class ResponsesEventTranslator:
             self.content_block_types[index] = block.get("type")
             if block.get("type") == "text":
                 events.extend(self._ensure_text_started(index))
-            elif block.get("type") == "thinking":
+            elif block.get("type") in {"thinking", "redacted_thinking"}:
                 reasoning_index = self._reasoning_output_index()
-                commentary_index = self._commentary_output_index()
                 meta = {"type": block.get("type", "thinking")}
                 for field_name in ("signature", "data"):
                     field_value = block.get(field_name)
                     if isinstance(field_value, str) and field_value:
                         meta[field_name] = field_value
                 self.reasoning_meta[reasoning_index] = meta
+                initial_text = block.get("thinking") or block.get("text") or ""
+                if initial_text:
+                    self.reasoning_buffers[reasoning_index] = self.reasoning_buffers.get(reasoning_index, "") + initial_text
                 encrypted_content = _reasoning_encrypted_content(
                     meta,
                     response_context=self.response_context,
-                    content_text=block.get("thinking") or block.get("text") or "",
+                    content_text=self.reasoning_buffers.get(reasoning_index, ""),
                 )
                 if encrypted_content is not None:
                     self.reasoning_encrypted[reasoning_index] = encrypted_content
                 events.extend(self._ensure_reasoning_started(reasoning_index))
-                events.extend(self._ensure_commentary_started(commentary_index))
+                if block.get("type") == "thinking" and initial_text:
+                    commentary_index = self._commentary_output_index()
+                    self.commentary_buffers[commentary_index] = self.commentary_buffers.get(commentary_index, "") + initial_text
+                    events.extend(self._ensure_commentary_started(commentary_index))
             elif block.get("type") == "tool_use":
                 if not self.response_context.get("parallel_tool_calls", True) and self.tool_calls:
                     raise UnsupportedFeatureError(
@@ -2663,7 +2669,7 @@ class ResponsesEventTranslator:
             index = event.get("index", 0)
             if index in self.ignored_tool_indexes:
                 return events
-            if self.content_block_types.get(index) == "thinking" and self.reasoning_index is not None:
+            if self.content_block_types.get(index) in {"thinking", "redacted_thinking"} and self.reasoning_index is not None:
                 reasoning_index = self._reasoning_output_index()
                 meta = self.reasoning_meta.get(reasoning_index, {"type": "thinking"})
                 encrypted_content = _reasoning_encrypted_content(

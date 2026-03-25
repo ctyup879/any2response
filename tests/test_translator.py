@@ -1445,6 +1445,30 @@ def test_translate_anthropic_response_omits_reasoning_encrypted_content_when_ups
     assert "encrypted_content" not in reasoning_item
 
 
+def test_translate_anthropic_response_redacted_thinking_omits_empty_commentary_message():
+    body = {
+        "id": "msg_redacted",
+        "content": [
+            {"type": "redacted_thinking", "data": "redacted_blob_123"},
+            {"type": "text", "text": "Answer"},
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+    }
+
+    translated = translate_anthropic_response(
+        body,
+        "codex-MiniMax-M2.7",
+        response_context={"include": ["reasoning.encrypted_content"]},
+    )
+
+    output_types = [item["type"] for item in translated["output"]]
+    phases = [item.get("phase") for item in translated["output"] if item.get("type") == "message"]
+
+    assert output_types == ["reasoning", "message"]
+    assert phases == ["final_answer"]
+    assert translated["output"][0]["encrypted_content"].startswith("a2r_reasoning_v1:")
+
+
 def test_translate_anthropic_response_includes_request_context_fields():
     body = {
         "id": "msg_ctx",

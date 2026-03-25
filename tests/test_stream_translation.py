@@ -288,6 +288,46 @@ def test_translate_anthropic_thinking_block_omits_reasoning_encrypted_content_wh
     assert "encrypted_content" not in done["data"]["item"]
 
 
+def test_translate_anthropic_redacted_thinking_block_emits_reasoning_without_empty_commentary():
+    translator = ResponsesEventTranslator(
+        response_context={"include": ["reasoning.encrypted_content"]},
+    )
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "redacted_thinking", "data": "redacted_blob_456"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {"type": "content_block_start", "index": 1, "content_block": {"type": "text", "text": ""}},
+        {
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": "Answer"},
+        },
+        {"type": "content_block_stop", "index": 1},
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    done_items = [
+        event["data"]["item"]
+        for event in events
+        if event["event"] == "response.output_item.done"
+    ]
+
+    assert sorted(item["type"] for item in done_items) == ["message", "reasoning"]
+    reasoning_item = next(item for item in done_items if item["type"] == "reasoning")
+    message_item = next(item for item in done_items if item["type"] == "message")
+    assert reasoning_item["encrypted_content"].startswith("a2r_reasoning_v1:")
+    assert message_item["phase"] == "final_answer"
+
+
 def test_translate_anthropic_thinking_block_omits_proxy_encrypted_content_when_requested_without_upstream_value():
     translator = ResponsesEventTranslator(
         response_context={"include": ["reasoning.encrypted_content"]},
