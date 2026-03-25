@@ -54,9 +54,9 @@ def create_app(settings_override=None, upstream_client=None):
         )
         try:
             translated = translate_responses_request(body)
+            response_context = build_response_context(body, model=translated.get("model"))
         except UnsupportedFeatureError as exc:
             return _error_response(400, str(exc), "unsupported_feature")
-        response_context = build_response_context(body, model=translated.get("model"))
 
         stream = translated.get("stream", True)
 

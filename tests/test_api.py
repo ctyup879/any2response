@@ -229,3 +229,55 @@ def test_post_responses_stream_emits_error_for_parallel_tool_call_violation():
     assert "event: error" in response.text
     assert "parallel_tool_calls" in response.text
     assert "data: [DONE]" in response.text
+
+
+def test_post_responses_rejects_nonempty_include_requests():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": False,
+            "include": ["reasoning.encrypted_content"],
+            "input": "hello",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "unsupported_feature"
+    assert "include" in response.json()["error"]["message"]
+
+
+def test_post_responses_rejects_zero_top_logprobs():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/responses",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": False,
+            "top_logprobs": 0,
+            "input": "hello",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"]["type"] == "unsupported_feature"
+    assert "top_logprobs" in response.json()["error"]["message"]

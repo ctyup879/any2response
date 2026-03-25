@@ -29,7 +29,6 @@ RESPONSE_INCOMPLETE_STOP_REASONS = {
     "pause_turn": {"reason": "other"},
 }
 SUPPORTED_REASONING_SUMMARIES = {None, "auto", "concise", "detailed"}
-PROXY_REASONING_PREFIX = "proxy_reasoning_v1:"
 
 
 def _stringify(value):
@@ -94,6 +93,8 @@ def _decode_data_url_text(parsed):
 
 
 def _translate_image_block(item):
+    if item.get("file_id"):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: input_image.file_id is not supported")
     image_url = item.get("image_url", "")
     if isinstance(image_url, dict):
         image_url = image_url.get("url", "")
@@ -117,11 +118,83 @@ def _translate_image_block(item):
 def _image_detail_instruction(detail):
     if detail in (None, "auto"):
         return None
-    if detail == "low":
-        return "Analyze the following image with low visual detail."
-    if detail == "high":
-        return "Analyze the following image with high visual detail."
     raise UnsupportedFeatureError("Unsupported Responses API feature: input_image.detail is not supported")
+
+
+def _normalize_max_output_tokens(value):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: max_output_tokens is not supported")
+    return value
+
+
+def _normalize_temperature(value):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: temperature is not supported")
+    if value < 0 or value > 2:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: temperature is not supported")
+    return value
+
+
+def _normalize_top_p(value):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: top_p is not supported")
+    if value < 0 or value > 1:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: top_p is not supported")
+    return value
+
+
+def _normalize_stop(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, list) or not value:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: stop is not supported")
+    if any(not isinstance(item, str) for item in value):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: stop is not supported")
+    return value
+
+
+def _normalize_parallel_tool_calls(value):
+    if value is None:
+        return True
+    if not isinstance(value, bool):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: parallel_tool_calls is not supported")
+    return value
+
+
+def _normalize_metadata(value):
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: metadata is not supported")
+    if any(not isinstance(key, str) for key in value):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: metadata is not supported")
+    return value
+
+
+def _normalize_user(value):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: user is not supported")
+    return value
+
+
+def _validate_request_scalar_fields(body):
+    _normalize_max_output_tokens(body.get("max_output_tokens"))
+    _normalize_temperature(body.get("temperature"))
+    _normalize_top_p(body.get("top_p"))
+    _normalize_stop(body.get("stop"))
+    _normalize_parallel_tool_calls(body.get("parallel_tool_calls"))
+    _normalize_metadata(body.get("metadata"))
+    _normalize_user(body.get("user"))
 
 
 def _builtin_tool_input_schema(tool_type, environment=None):
@@ -148,7 +221,7 @@ def _builtin_tool_input_schema(tool_type, environment=None):
                     "required": ["commands"],
                     "additionalProperties": False,
                 },
-                "environment": {"type": "object"},
+                "environment": _shell_environment_schema(),
             },
             "required": ["action"],
             "additionalProperties": False,
@@ -160,6 +233,64 @@ def _builtin_tool_input_schema(tool_type, environment=None):
     raise UnsupportedFeatureError(f"Unsupported Responses API tool type: {tool_type}")
 
 
+def _shell_environment_schema():
+    return {
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": "local"},
+                    "skills": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {"type": "string"},
+                                "path": {"type": "string"},
+                                "description": {"type": "string"},
+                            },
+                            "required": ["name", "path"],
+                            "additionalProperties": False,
+                        },
+                    },
+                },
+                "required": ["type"],
+                "additionalProperties": False,
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": "container_reference"},
+                    "container_id": {"type": "string"},
+                },
+                "required": ["type", "container_id"],
+                "additionalProperties": False,
+            },
+        ]
+    }
+
+
+def _normalize_shell_skill(skill):
+    if not isinstance(skill, dict):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
+    unknown_keys = set(skill) - {"name", "path", "description"}
+    if unknown_keys:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
+    name = skill.get("name")
+    path = skill.get("path")
+    if not isinstance(name, str) or not name.strip():
+        raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
+    if not isinstance(path, str) or not path.strip():
+        raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
+    normalized = {"name": name, "path": path}
+    description = skill.get("description")
+    if description is not None:
+        if not isinstance(description, str):
+            raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
+        normalized["description"] = description
+    return normalized
+
+
 def _custom_tool_description(description, format_spec):
     description = description or ""
     format_type = format_spec.get("type", "text")
@@ -168,7 +299,7 @@ def _custom_tool_description(description, format_spec):
     if format_type == "grammar":
         syntax = format_spec.get("syntax")
         definition = format_spec.get("definition")
-        if syntax not in {"regex", "lark"} or not isinstance(definition, str) or not definition.strip():
+        if syntax != "regex" or not isinstance(definition, str) or not definition.strip():
             raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
         return description
     raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
@@ -181,13 +312,10 @@ def _custom_tool_input_schema(format_spec):
     elif format_type == "grammar":
         syntax = format_spec.get("syntax")
         definition = format_spec.get("definition")
-        if syntax not in {"regex", "lark"} or not isinstance(definition, str) or not definition.strip():
+        if syntax != "regex" or not isinstance(definition, str) or not definition.strip():
             raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
         input_property = {"type": "string"}
-        if syntax == "regex":
-            input_property["pattern"] = definition
-        else:
-            input_property["description"] = f"Input must conform to this lark grammar:\n{definition}"
+        input_property["pattern"] = definition
     else:
         raise UnsupportedFeatureError("Unsupported Responses API feature: custom tool format is not supported")
     return {
@@ -203,7 +331,27 @@ def _normalize_shell_environment(environment):
         return None
     if not isinstance(environment, dict):
         raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
-    return environment
+    environment_type = environment.get("type")
+    if environment_type == "local":
+        unknown_keys = set(environment) - {"type", "skills"}
+        if unknown_keys:
+            raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
+        normalized = {"type": "local"}
+        skills = environment.get("skills")
+        if skills is not None:
+            if not isinstance(skills, list):
+                raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
+            normalized["skills"] = [_normalize_shell_skill(skill) for skill in skills]
+        return normalized
+    if environment_type == "container_reference":
+        unknown_keys = set(environment) - {"type", "container_id"}
+        if unknown_keys:
+            raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
+        container_id = environment.get("container_id")
+        if not isinstance(container_id, str) or not container_id.strip():
+            raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
+        return {"type": "container_reference", "container_id": container_id}
+    raise UnsupportedFeatureError("Unsupported Responses API feature: shell environment is not supported")
 
 
 def _translate_file_block(item):
@@ -271,7 +419,7 @@ def _translate_content_blocks(content):
         if item_type == "tool_use":
             name = (item.get("name") or "").strip()
             if not name:
-                continue
+                raise UnsupportedFeatureError("Unsupported Responses API feature: tool call name is required")
             blocks.append(
                 {
                     "type": "tool_use",
@@ -284,7 +432,7 @@ def _translate_content_blocks(content):
         if item_type == "tool_result":
             tool_use_id = item.get("tool_use_id") or item.get("call_id")
             if not tool_use_id:
-                continue
+                raise UnsupportedFeatureError("Unsupported Responses API feature: tool_result tool_use_id is required")
             block = {
                 "type": "tool_result",
                 "tool_use_id": tool_use_id,
@@ -302,10 +450,7 @@ def _translate_content_blocks(content):
 
 def _translate_tool_result_content(value):
     if isinstance(value, list):
-        try:
-            return _translate_content_blocks(value)
-        except UnsupportedFeatureError:
-            return _stringify(value)
+        return _translate_content_blocks(value)
     if isinstance(value, dict):
         if value.get("type"):
             return _translate_content_blocks([value])
@@ -318,6 +463,27 @@ def _builtin_tool_description(tool_type, description, environment=None):
     return description
 
 
+def _require_named_tool(tool_type, tool_name):
+    if tool_type in {None, "function", "custom"}:
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            raise UnsupportedFeatureError("Unsupported Responses API feature: tool name is required")
+        return tool_name.strip()
+    if isinstance(tool_name, str):
+        return tool_name.strip()
+    return ""
+
+
+def _normalize_function_parameters(tool):
+    parameters = tool.get("parameters")
+    if parameters is None and isinstance(tool.get("function"), dict):
+        parameters = tool["function"].get("parameters")
+    if parameters is None:
+        return {"type": "object", "properties": {}}
+    if not isinstance(parameters, dict):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: tool parameters must be an object")
+    return parameters
+
+
 def _translate_tools(tools):
     translated = []
     for tool in tools or []:
@@ -327,6 +493,7 @@ def _translate_tools(tools):
         tool_name = tool.get("name") or tool.get("function", {}).get("name", "")
         if tool_type in {"apply_patch", "shell"} and not tool_name:
             tool_name = tool_type
+        tool_name = _require_named_tool(tool_type, tool_name)
         if tool_type not in {None, "function", "custom", "apply_patch", "shell"}:
             if not str(tool_name).strip():
                 continue
@@ -368,9 +535,7 @@ def _translate_tools(tools):
                 "name": tool_name,
                 "description": tool.get("description")
                 or tool.get("function", {}).get("description", ""),
-                "input_schema": tool.get("parameters")
-                or tool.get("function", {}).get("parameters")
-                or {"type": "object", "properties": {}},
+                "input_schema": _normalize_function_parameters(tool),
             }
         )
     return translated
@@ -381,13 +546,9 @@ def _normalize_include(include):
         return []
     if not isinstance(include, list):
         raise UnsupportedFeatureError("Unsupported Responses API include value")
-    allowed = {"reasoning.encrypted_content", "message.output_text.logprobs"}
-    normalized = []
-    for value in include:
-        if value not in allowed:
-            raise UnsupportedFeatureError(f"Unsupported Responses API include value: {value}")
-        normalized.append(value)
-    return normalized
+    if include:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: include is not supported")
+    return []
 
 
 def _normalize_stream_options(stream_options, stream=True):
@@ -523,15 +684,13 @@ def _normalize_reasoning_config(reasoning):
     return normalized
 
 
+def _normalize_top_logprobs(value):
+    if value is not None:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: top_logprobs is not supported")
+    return None
+
+
 def _output_text_logprobs(response_context=None):
-    if not isinstance(response_context, dict):
-        return None
-    include = response_context.get("include", [])
-    if "message.output_text.logprobs" in include:
-        return []
-    top_logprobs = response_context.get("top_logprobs")
-    if isinstance(top_logprobs, int) and not isinstance(top_logprobs, bool) and top_logprobs >= 0:
-        return []
     return None
 
 
@@ -575,23 +734,6 @@ def _text_delta_payload(item_id, output_index, delta_text, response_context=None
     return payload
 
 
-def _encode_proxy_reasoning_content(text):
-    if not isinstance(text, str) or not text:
-        return None
-    encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
-    return f"{PROXY_REASONING_PREFIX}{encoded}"
-
-
-def _decode_proxy_reasoning_content(value):
-    if not isinstance(value, str) or not value.startswith(PROXY_REASONING_PREFIX):
-        return None
-    encoded = value[len(PROXY_REASONING_PREFIX) :]
-    try:
-        return base64.b64decode(encoded).decode("utf-8")
-    except Exception as exc:
-        raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning.encrypted_content is invalid") from exc
-
-
 def _assistant_message_item_payload(item_id, text, status, phase="final_answer", response_context=None):
     return {
         "id": item_id,
@@ -601,6 +743,10 @@ def _assistant_message_item_payload(item_id, text, status, phase="final_answer",
         "status": status,
         "content": [_output_text_part(text, response_context=response_context)],
     }
+
+
+def _assistant_blocks_have_open_tool_use(blocks):
+    return any(isinstance(block, dict) and block.get("type") == "tool_use" for block in blocks)
 
 
 def _apply_assistant_phase(content_blocks, phase):
@@ -682,18 +828,7 @@ def _usage_payload(usage):
 
 
 def _reasoning_encrypted_content(block, response_context=None, content_text=None):
-    include = []
-    if isinstance(response_context, dict):
-        include = response_context.get("include", [])
-    if "reasoning.encrypted_content" not in include:
-        return None
-    for field_name in ("data", "signature"):
-        value = block.get(field_name)
-        if value is not None:
-            return _stringify(value)
-    if content_text is None:
-        content_text = block.get("thinking") or block.get("text") or ""
-    return _encode_proxy_reasoning_content(content_text)
+    return None
 
 
 def _reasoning_summary_text(text, response_context=None):
@@ -735,10 +870,10 @@ def _reasoning_item_payload(item_id, summary_text, content_text=None, encrypted_
 
 
 def _reasoning_input_text(item):
-    encrypted_content = item.get("encrypted_content")
-    decoded = _decode_proxy_reasoning_content(encrypted_content)
-    if decoded:
-        return decoded
+    if item.get("encrypted_content") is not None:
+        raise UnsupportedFeatureError(
+            "Unsupported Responses API feature: reasoning.encrypted_content replay is not supported"
+        )
     content = item.get("content")
     if isinstance(content, list):
         text_parts = []
@@ -759,7 +894,7 @@ def _reasoning_input_text(item):
                 text_parts.append(part["text"])
         if text_parts:
             return " ".join(text_parts)
-    raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning input items require content or encrypted_content")
+    raise UnsupportedFeatureError("Unsupported Responses API feature: reasoning input items require textual content")
 
 
 def _normalize_response_tools(tools):
@@ -772,10 +907,13 @@ def _normalize_response_tools(tools):
         tool_type = normalized_tool.get("type")
         if tool_type in {"apply_patch", "shell"} and not normalized_tool.get("name"):
             normalized_tool["name"] = tool_type
+        normalized_tool["name"] = _require_named_tool(tool_type, normalized_tool.get("name") or normalized_tool.get("function", {}).get("name", ""))
         if tool_type == "custom" and "format" not in normalized_tool:
             normalized_tool["format"] = {"type": "text"}
         if tool_type in {None, "function"} and "strict" not in normalized_tool:
             normalized_tool["strict"] = True
+        if tool_type in {None, "function"}:
+            normalized_tool["parameters"] = _normalize_function_parameters(normalized_tool)
         normalized.append(normalized_tool)
     return normalized
 
@@ -862,7 +1000,7 @@ def _validate_builtin_tool_output_item(item):
 def _builtin_tool_output_content(item):
     item_type = item.get("type")
     output = item.get("output", "")
-    metadata = {}
+    metadata = {"type": item_type} if item_type in {"apply_patch_call_output", "shell_call_output"} else {}
     if item.get("id") is not None:
         metadata["id"] = item["id"]
     if item.get("status") is not None:
@@ -907,21 +1045,22 @@ def build_response_context(body, model=None):
         else:
             text_config = {"format": {"type": "text"}}
 
+    _validate_request_scalar_fields(body)
     reasoning = _normalize_reasoning_config(body.get("reasoning"))
 
     return {
         "model": model or body.get("model"),
         "instructions": body.get("instructions"),
-        "max_output_tokens": body.get("max_output_tokens"),
-        "metadata": body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
-        "user": body.get("user"),
+        "max_output_tokens": _normalize_max_output_tokens(body.get("max_output_tokens")),
+        "metadata": _normalize_metadata(body.get("metadata")),
+        "user": _normalize_user(body.get("user")),
         "store": body.get("store", False),
         "tool_choice": body.get("tool_choice", "auto"),
         "tools": _effective_response_tools(body),
         "text": text_config,
-        "temperature": body.get("temperature", 1.0),
-        "top_p": body.get("top_p", 1.0),
-        "parallel_tool_calls": body.get("parallel_tool_calls", True),
+        "temperature": _normalize_temperature(body.get("temperature")) if body.get("temperature") is not None else 1.0,
+        "top_p": _normalize_top_p(body.get("top_p")) if body.get("top_p") is not None else 1.0,
+        "parallel_tool_calls": _normalize_parallel_tool_calls(body.get("parallel_tool_calls")),
         "reasoning": reasoning,
         "previous_response_id": body.get("previous_response_id"),
         "truncation": body.get("truncation", "disabled"),
@@ -929,7 +1068,7 @@ def build_response_context(body, model=None):
         "background": body.get("background", False),
         "include": _normalize_include(body.get("include")),
         "prompt_cache_key": body.get("prompt_cache_key"),
-        "top_logprobs": body.get("top_logprobs"),
+        "top_logprobs": _normalize_top_logprobs(body.get("top_logprobs")),
         "stream_options": _normalize_stream_options(body.get("stream_options"), body.get("stream", True)),
     }
 
@@ -977,13 +1116,17 @@ def _translate_tool_choice(tool_choice):
 def _allowed_tool_names(tool_choice):
     if not isinstance(tool_choice, dict) or tool_choice.get("type") != "allowed_tools":
         return None
+    raw_tools = tool_choice.get("tools")
+    if not isinstance(raw_tools, list) or not raw_tools:
+        raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.allowed_tools is not supported")
     names = []
-    for tool in tool_choice.get("tools", []):
+    for tool in raw_tools:
         if not isinstance(tool, dict):
-            continue
+            raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.allowed_tools is not supported")
         name = tool.get("name") or tool.get("function", {}).get("name", "")
-        if isinstance(name, str) and name.strip():
-            names.append(name.strip())
+        if not isinstance(name, str) or not name.strip():
+            raise UnsupportedFeatureError("Unsupported Responses API feature: tool_choice.allowed_tools is not supported")
+        names.append(name.strip())
     return set(names)
 
 
@@ -1120,6 +1263,7 @@ def _iter_input_items(raw_input):
 
 def translate_responses_request(body):
     _validate_supported_request_fields(body)
+    _validate_request_scalar_fields(body)
     if body.get("background"):
         raise UnsupportedFeatureError("background mode is not supported")
     if body.get("previous_response_id"):
@@ -1133,26 +1277,27 @@ def translate_responses_request(body):
         raise UnsupportedFeatureError("Unsupported Responses API feature: max_tool_calls is not supported")
     _normalize_include(body.get("include"))
     _normalize_stream_options(body.get("stream_options"), body.get("stream", True))
-    top_logprobs = body.get("top_logprobs")
-    if top_logprobs is not None and (
-        not isinstance(top_logprobs, int) or isinstance(top_logprobs, bool) or top_logprobs < 0
-    ):
-        raise UnsupportedFeatureError("Unsupported Responses API feature: top_logprobs is not supported")
+    _normalize_top_logprobs(body.get("top_logprobs"))
 
     result = {
         "model": body.get("model"),
         "messages": [],
         "stream": body.get("stream", True),
-        "max_tokens": body.get("max_output_tokens") or 4096,
     }
+    max_output_tokens = _normalize_max_output_tokens(body.get("max_output_tokens"))
+    if max_output_tokens is not None:
+        result["max_tokens"] = max_output_tokens
 
-    if body.get("temperature") is not None:
-        result["temperature"] = body["temperature"]
-    if body.get("top_p") is not None:
-        result["top_p"] = body["top_p"]
-    if body.get("stop") is not None:
-        result["stop_sequences"] = body["stop"] if isinstance(body["stop"], list) else [body["stop"]]
-    thinking = _thinking_from_reasoning(body, result["max_tokens"])
+    temperature = _normalize_temperature(body.get("temperature"))
+    if temperature is not None:
+        result["temperature"] = temperature
+    top_p = _normalize_top_p(body.get("top_p"))
+    if top_p is not None:
+        result["top_p"] = top_p
+    stop_sequences = _normalize_stop(body.get("stop"))
+    if stop_sequences is not None:
+        result["stop_sequences"] = stop_sequences
+    thinking = _thinking_from_reasoning(body, result.get("max_tokens"))
     if thinking:
         result["thinking"] = thinking
 
@@ -1169,7 +1314,17 @@ def translate_responses_request(body):
     allowed_tool_names = _allowed_tool_names(body.get("tool_choice"))
     tools = _translate_tools(body.get("tools", []))
     if allowed_tool_names is not None:
+        known_tool_names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
+        missing_names = sorted(name for name in allowed_tool_names if name not in known_tool_names)
+        if missing_names:
+            raise UnsupportedFeatureError(
+                "Unsupported Responses API feature: tool_choice.allowed_tools references unknown tools"
+            )
         tools = [tool for tool in tools if tool.get("name") in allowed_tool_names]
+        if not tools:
+            raise UnsupportedFeatureError(
+                "Unsupported Responses API feature: tool_choice.allowed_tools did not match any tools"
+            )
 
     tool_choice_input = body.get("tool_choice")
     if isinstance(tool_choice_input, dict) and tool_choice_input.get("type") == "allowed_tools":
@@ -1263,6 +1418,8 @@ def translate_responses_request(body):
             translated_content = _translate_content_blocks(item.get("content", []))
             if role == "assistant":
                 flush_tool_results()
+                if current_assistant_blocks and not _assistant_blocks_have_open_tool_use(current_assistant_blocks):
+                    flush_assistant()
                 translated_content = _apply_assistant_phase(translated_content, phase)
                 current_assistant_blocks.extend(translated_content)
                 continue
@@ -1276,8 +1433,10 @@ def translate_responses_request(body):
             elif item_type == "shell_call":
                 name = "shell"
             if not name:
-                continue
+                raise UnsupportedFeatureError("Unsupported Responses API feature: tool call name is required")
             flush_tool_results()
+            if current_assistant_blocks and not _assistant_blocks_have_open_tool_use(current_assistant_blocks):
+                flush_assistant()
             if item_type == "custom_tool_call":
                 tool_input = _custom_tool_payload(item.get("input"))
             elif item_type == "apply_patch_call":
@@ -1315,7 +1474,7 @@ def translate_responses_request(body):
             flush_assistant()
             call_id = item.get("call_id", "")
             if not call_id:
-                continue
+                raise UnsupportedFeatureError("Unsupported Responses API feature: tool call output call_id is required")
             _validate_builtin_tool_output_item(item)
             content = (
                 _builtin_tool_output_content(item)
@@ -1339,6 +1498,8 @@ def translate_responses_request(body):
 
         if item_type == "reasoning":
             flush_tool_results()
+            if current_assistant_blocks and not _assistant_blocks_have_open_tool_use(current_assistant_blocks):
+                flush_assistant()
             current_assistant_blocks.append(
                 {
                     "type": "thinking",
@@ -1373,6 +1534,10 @@ def translate_responses_request(body):
                 if block.get("type") == "tool_result":
                     if block.get("tool_use_id") and str(block["tool_use_id"]) in all_tool_use_ids:
                         filtered_blocks.append(block)
+                    else:
+                        raise UnsupportedFeatureError(
+                            "Unsupported Responses API feature: orphan tool_result is not supported"
+                        )
                 else:
                     filtered_blocks.append(block)
             if filtered_blocks:
@@ -1392,7 +1557,6 @@ def translate_anthropic_response(body, model, response_context=None):
     completed_at = int(time.time())
     output = []
     final_text_parts = []
-    commentary_text_parts = []
     parallel_tool_calls = True if response_context is None else response_context.get("parallel_tool_calls", True)
     tool_call_seen = False
     response_status, incomplete_details = _response_completion_from_stop_reason(body.get("stop_reason"))
@@ -1418,7 +1582,6 @@ def translate_anthropic_response(body, model, response_context=None):
                     status=reasoning_status,
                 )
             )
-            commentary_text_parts.append(content_text)
             output.append(
                 _assistant_message_item_payload(
                     f"msg_{response_id}_commentary_{index}",
@@ -1466,7 +1629,7 @@ def translate_anthropic_response(body, model, response_context=None):
         "error": None,
         "incomplete_details": incomplete_details,
         "output": output,
-        "output_text": "".join(final_text_parts if final_text_parts else commentary_text_parts),
+        "output_text": "".join(final_text_parts),
         "usage": _usage_payload(body.get("usage", {})),
     }
     if response_context:
@@ -1580,14 +1743,6 @@ class ResponsesEventTranslator:
                 _reasoning_summary_text(full_text, response_context=self.response_context),
             )
             encrypted_content = self.reasoning_encrypted.get(self.reasoning_index)
-            if encrypted_content is None:
-                encrypted_content = _reasoning_encrypted_content(
-                    {},
-                    response_context=self.response_context,
-                    content_text=full_text,
-                )
-                if encrypted_content is not None:
-                    self.reasoning_encrypted[self.reasoning_index] = encrypted_content
             items.append(
                 (
                     self.reasoning_index,
@@ -1695,10 +1850,6 @@ class ResponsesEventTranslator:
             if self.message_added:
                 payload["output_text"] = "".join(
                     self.text_buffers.get(idx, "") for idx in sorted(self.message_added)
-                )
-            elif self.commentary_added:
-                payload["output_text"] = "".join(
-                    self.commentary_buffers.get(idx, "") for idx in sorted(self.commentary_added)
                 )
             else:
                 payload["output_text"] = ""
@@ -1885,14 +2036,6 @@ class ResponsesEventTranslator:
             _reasoning_summary_text(full_text, response_context=self.response_context),
         )
         encrypted_content = self.reasoning_encrypted.get(index)
-        if encrypted_content is None:
-            encrypted_content = _reasoning_encrypted_content(
-                {},
-                response_context=self.response_context,
-                content_text=full_text,
-            )
-            if encrypted_content is not None:
-                self.reasoning_encrypted[index] = encrypted_content
         return [
             self._emit(
                 "response.reasoning_summary_text.done",

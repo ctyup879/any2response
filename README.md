@@ -65,7 +65,7 @@ Currently supported on `/v1/responses`:
 - Text input via top-level string input or message items
 - Developer/system instructions folded into Anthropic `system`
 - Function tools, `tool_choice` (`auto`, `none`, `required`, named function)
-- `tool_choice.allowed_tools` via proxy-side tool filtering
+- `tool_choice.allowed_tools` via validated proxy-side tool filtering
 - `tool_choice` best-effort support for named `custom`, `apply_patch`, and `shell` selections
 - built-in `apply_patch` / `shell` selection synthesized into proxy-side tool definitions when needed
 - Function call / function call output turn translation
@@ -79,21 +79,16 @@ Currently supported on `/v1/responses`:
 - Text/image/PDF user content blocks:
   - `input_text`
   - `input_image` with `data:` URL or `http(s)` URL
-  - best-effort `input_image.detail` support:
-    - `auto` passes through unchanged
-    - `low` / `high` inject image-detail guidance text ahead of the translated image block
+  - `input_image.detail` values other than `auto` are explicitly rejected
   - `input_file` with inline `data:` for text, JSON, images, and PDFs
 - Sampling and output controls:
-  - `max_output_tokens`
+  - `max_output_tokens` when explicitly provided
   - `temperature`
   - `top_p`
   - `stop`
   - `text.format` and legacy `response_format` for JSON-mode instruction injection
   - best-effort `text.verbosity` via injected system guidance
   - `prompt_cache_key` retained in proxy response context
-  - `include: ["reasoning.encrypted_content"]`
-  - `include: ["message.output_text.logprobs"]`
-  - `top_logprobs`, returned as empty `logprobs` arrays because MiniMax does not expose token scores on this endpoint
   - `parallel_tool_calls: false` enforced proxy-side by rejecting upstream turns that contain multiple tool calls
   - `stream_options.include_obfuscation` on streaming delta events
 - Reasoning controls:
@@ -125,32 +120,40 @@ Explicitly unsupported today:
 - `safety_identifier`
 - `service_tier`
 - `input_file.file_id`
+- `input_image.file_id`
+- `input_image.detail` values other than `auto`
 - remote text-file fetching and most non-text/non-image/non-PDF file media types
 - named OpenAI hosted or remote tool types beyond plain function/custom tools, such as `file_search`, `web_search`, `computer_use`, `code_interpreter`, and `mcp`
 - full OpenAI reasoning item replay semantics
+- non-empty `include` requests, including `reasoning.encrypted_content`, `message.output_text.logprobs`, and `message.input_image.image_url`
+- all `top_logprobs` requests
+- custom tool grammars with `syntax: "lark"`
 - annotations/citations style response extras
 
 Compatibility notes:
 
 - `custom` tools from Codex are accepted and exposed upstream as plain callable tools with an object schema.
 - assistant text outputs are labeled with `phase: "final_answer"`.
-- assistant message `phase` is preserved proxy-side:
+- `output_text` only reflects assistant `final_answer` text; commentary / reasoning text is not folded into `output_text`.
+- assistant message `phase` is bridged proxy-side rather than preserved as a native upstream field:
   - input `phase: "commentary"` maps onto Anthropic `thinking` blocks
   - input `phase: "final_answer"` remains normal assistant text
   - Anthropic `thinking` output is surfaced both as a `reasoning` item and as an assistant `message` item with `phase: "commentary"` for multi-turn replay
   - non-assistant messages with `phase` are rejected
+  - consecutive assistant messages remain distinct unless they must be merged to keep a pending `tool_result` adjacent to its `tool_use` for MiniMax compatibility
 - function tools with `strict=false` are accepted for Codex compatibility; the flag is preserved in proxy response context but not enforced by the Anthropic upstream.
 - function tools omitted `strict` on input are echoed back with the OpenAI default `strict: true`.
 - developer/system messages are text-only; non-text content is rejected instead of being dropped.
-- `reasoning` input items are accepted when they contain textual reasoning content or proxy-generated `encrypted_content`.
-- `include: ["reasoning.encrypted_content"]` returns upstream `data` / `signature` values when available, and otherwise falls back to a proxy-generated opaque payload that this proxy can replay on later turns.
+- `reasoning` input items are accepted only when they contain textual reasoning content; encrypted reasoning replay payloads are explicitly unsupported.
 - `reasoning.summary: "concise"` now shapes reasoning summaries proxy-side instead of merely echoing the request field back.
 - built-in `apply_patch` and `shell` calls are modeled with their OpenAI item types on the Responses side, while still being proxied upstream as Anthropic-style tool calls.
-- `shell_call.environment` is preserved structurally, and top-level `tools[].environment` is carried as a shell input-schema default plus a response-side fallback when the upstream tool call omits it.
+- `shell_call.environment` is preserved structurally when it matches the supported OpenAI shapes (`local` or `container_reference`), and top-level `tools[].environment` is carried as a shell input-schema default plus a response-side fallback when the upstream tool call omits it.
 - `shell_call` is normalized to the OpenAI `action` object shape on the Responses side; legacy flat shell payloads are still accepted on input for compatibility.
-- `input_image.detail: low|high` is approximated through injected guidance text because Anthropic image blocks do not expose an equivalent structural field.
-- custom tool grammars with `syntax: "regex"` are mapped structurally; `syntax: "lark"` is accepted on a best-effort basis by attaching the grammar to the string input schema description.
-- built-in tool output replay preserves `id` / `status` / `max_output_length` inside the serialized tool result payload, and still maps failure-like statuses and shell nonzero exits/timeouts onto `is_error: true`.
+- custom tool grammars with `syntax: "regex"` are mapped structurally; `syntax: "lark"` is explicitly rejected.
+- built-in tool output replay preserves `type` / `id` / `status` / `max_output_length` inside the serialized tool result payload, and still maps failure-like statuses and shell nonzero exits/timeouts onto `is_error: true`.
 - failed `apply_patch_call_output` and `shell_call_output` items are translated into Anthropic `tool_result` blocks with `is_error: true`.
 - nameless hosted tools from Codex are ignored instead of failing the request, so Codex CLI can continue to operate when it sends local-only tool descriptors the proxy cannot translate upstream.
-- output-text `logprobs` fields are emitted as empty arrays whenever `message.output_text.logprobs` or `top_logprobs` is requested, preserving the response shape without claiming unavailable token-level scores from MiniMax.
+- malformed function/custom tool definitions and malformed tool-call replay items are rejected explicitly instead of being skipped or silently normalized.
+- unsupported multimodal content inside tool outputs is rejected explicitly instead of being stringified.
+- orphan `tool_result` blocks are rejected explicitly instead of being silently filtered out.
+- malformed `tool_choice.allowed_tools` entries, unknown allowed tool names, and invalid scalar request controls are rejected locally before upstream dispatch.

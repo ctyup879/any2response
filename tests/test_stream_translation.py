@@ -70,7 +70,7 @@ def test_translate_anthropic_sse_includes_request_context_fields():
             "top_p": 0.9,
             "parallel_tool_calls": True,
             "max_output_tokens": 128,
-            "include": ["reasoning.encrypted_content"],
+            "include": [],
             "prompt_cache_key": "cache-key-123",
         },
     )
@@ -90,7 +90,7 @@ def test_translate_anthropic_sse_includes_request_context_fields():
     assert created["data"]["response"]["top_p"] == 0.9
     assert created["data"]["response"]["parallel_tool_calls"] is True
     assert created["data"]["response"]["max_output_tokens"] == 128
-    assert created["data"]["response"]["include"] == ["reasoning.encrypted_content"]
+    assert created["data"]["response"]["include"] == []
     assert created["data"]["response"]["prompt_cache_key"] == "cache-key-123"
     assert created["data"]["response"]["incomplete_details"] is None
     assert in_progress["data"]["response"]["metadata"] == {"request_id": "abc"}
@@ -180,6 +180,7 @@ def test_translate_anthropic_thinking_block_emits_commentary_message_events():
     ]
     assert len(commentary_messages) == 1
     assert commentary_messages[0]["content"][0]["text"] == "Planning"
+    assert completed["data"]["response"]["output_text"] == ""
 
 
 def test_translate_anthropic_thinking_block_uses_concise_summary_when_requested():
@@ -212,7 +213,7 @@ def test_translate_anthropic_thinking_block_uses_concise_summary_when_requested(
     assert summary_done["data"]["text"] == "First sentence."
 
 
-def test_translate_anthropic_thinking_block_emits_reasoning_encrypted_content_when_requested():
+def test_translate_anthropic_thinking_block_omits_reasoning_encrypted_content_even_if_requested():
     translator = ResponsesEventTranslator(
         response_context={"include": ["reasoning.encrypted_content"]},
     )
@@ -244,11 +245,11 @@ def test_translate_anthropic_thinking_block_emits_reasoning_encrypted_content_wh
     )
     completed = next(event for event in events if event["event"] == "response.completed")
 
-    assert done["data"]["item"]["encrypted_content"] == "enc_sig_456"
-    assert completed["data"]["response"]["output"][0]["encrypted_content"] == "enc_sig_456"
+    assert "encrypted_content" not in done["data"]["item"]
+    assert "encrypted_content" not in completed["data"]["response"]["output"][0]
 
 
-def test_translate_anthropic_thinking_block_generates_proxy_reasoning_encrypted_content_when_upstream_missing():
+def test_translate_anthropic_thinking_block_omits_reasoning_encrypted_content_when_upstream_missing():
     translator = ResponsesEventTranslator(
         response_context={"include": ["reasoning.encrypted_content"]},
     )
@@ -279,10 +280,10 @@ def test_translate_anthropic_thinking_block_generates_proxy_reasoning_encrypted_
         if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "reasoning"
     )
 
-    assert done["data"]["item"]["encrypted_content"].startswith("proxy_reasoning_v1:")
+    assert "encrypted_content" not in done["data"]["item"]
 
 
-def test_translate_anthropic_thinking_block_generates_proxy_encrypted_content_when_requested():
+def test_translate_anthropic_thinking_block_omits_proxy_encrypted_content_when_requested_without_upstream_value():
     translator = ResponsesEventTranslator(
         response_context={"include": ["reasoning.encrypted_content"]},
     )
@@ -313,7 +314,7 @@ def test_translate_anthropic_thinking_block_generates_proxy_encrypted_content_wh
         if event["event"] == "response.output_item.done" and event["data"]["item"]["type"] == "reasoning"
     )
 
-    assert done["data"]["item"]["encrypted_content"].startswith("proxy_reasoning_v1:")
+    assert "encrypted_content" not in done["data"]["item"]
 
 
 def test_translate_anthropic_reasoning_commentary_and_final_answer_use_distinct_output_indexes():
@@ -808,7 +809,7 @@ def test_translate_anthropic_stream_omits_logprobs_when_not_requested():
     assert "logprobs" not in text_done["data"]
 
 
-def test_translate_anthropic_stream_includes_empty_logprobs_when_zero_requested():
+def test_translate_anthropic_stream_omits_logprobs_when_zero_requested():
     translator = ResponsesEventTranslator(response_context={"top_logprobs": 0})
     events = []
 
@@ -834,8 +835,8 @@ def test_translate_anthropic_stream_includes_empty_logprobs_when_zero_requested(
     part_added = next(event for event in events if event["event"] == "response.content_part.added")
     text_done = next(event for event in events if event["event"] == "response.output_text.done")
 
-    assert part_added["data"]["part"]["logprobs"] == []
-    assert text_done["data"]["logprobs"] == []
+    assert "logprobs" not in part_added["data"]["part"]
+    assert "logprobs" not in text_done["data"]
 
 
 def test_translate_anthropic_stream_marks_max_tokens_stop_as_incomplete():
