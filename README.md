@@ -152,7 +152,7 @@ Compatibility notes:
 - custom tool grammars with `syntax: "regex"` are mapped structurally; `syntax: "lark"` is explicitly rejected.
 - built-in tool output replay preserves `type` / `id` / `status` / `max_output_length` inside the serialized tool result payload, and still maps failure-like statuses and shell nonzero exits/timeouts onto `is_error: true`.
 - failed `apply_patch_call_output` and `shell_call_output` items are translated into Anthropic `tool_result` blocks with `is_error: true`.
-- nameless hosted tools from Codex are ignored instead of failing the request, so Codex CLI can continue to operate when it sends local-only tool descriptors the proxy cannot translate upstream.
+- unsupported hosted or remote tool descriptors, including nameless hosted tools from Codex, are rejected explicitly instead of being ignored or silently dropped.
 - malformed function/custom tool definitions and malformed tool-call replay items are rejected explicitly instead of being skipped or silently normalized.
 - unsupported multimodal content inside tool outputs is rejected explicitly instead of being stringified.
 - orphan `tool_result` blocks are rejected explicitly instead of being silently filtered out.
