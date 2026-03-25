@@ -25,8 +25,6 @@ UNSUPPORTED_REQUEST_FIELDS = {
 RESPONSE_COMPLETED_STOP_REASONS = {None, "end_turn", "stop_sequence", "tool_use", "refusal"}
 RESPONSE_INCOMPLETE_STOP_REASONS = {
     "max_tokens": {"reason": "max_output_tokens"},
-    "model_context_window_exceeded": {"reason": "max_input_tokens"},
-    "pause_turn": {"reason": "other"},
 }
 SUPPORTED_REASONING_SUMMARIES = {None, "auto", "concise", "detailed"}
 
@@ -441,7 +439,10 @@ def _translate_content_blocks(content):
 
         item_type = item.get("type")
         if item_type in {"input_text", "output_text", "text"}:
-            blocks.append({"type": "text", "text": item.get("text", "")})
+            text = item.get("text")
+            if not isinstance(text, str):
+                raise UnsupportedFeatureError("Unsupported Responses API feature: text content is not supported")
+            blocks.append({"type": "text", "text": text})
             continue
         if item_type in {"input_image", "image_url"}:
             instruction = _image_detail_instruction(item.get("detail"))
@@ -579,15 +580,13 @@ def _translate_tools(tools):
             raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
         tool_type = tool.get("type")
         tool_name = tool.get("name") or tool.get("function", {}).get("name", "")
-        if tool_type in {"apply_patch", "shell"} and not tool_name:
-            tool_name = tool_type
-        tool_name = _require_named_tool(tool_type, tool_name)
         if tool_type not in {None, "function", "custom", "apply_patch", "shell"}:
-            if not str(tool_name).strip():
-                continue
             raise UnsupportedFeatureError(
                 f"Unsupported Responses API tool type: {tool_type}"
             )
+        if tool_type in {"apply_patch", "shell"} and not tool_name:
+            tool_name = tool_type
+        tool_name = _require_named_tool(tool_type, tool_name)
         if tool_type == "custom":
             format_spec = tool.get("format") or {"type": "text"}
             if not isinstance(format_spec, dict):
@@ -1000,6 +999,8 @@ def _normalize_response_tools(tools):
             raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
         normalized_tool = dict(tool)
         tool_type = normalized_tool.get("type")
+        if tool_type not in {None, "function", "custom", "apply_patch", "shell"}:
+            raise UnsupportedFeatureError(f"Unsupported Responses API tool type: {tool_type}")
         if tool_type in {"apply_patch", "shell"} and not normalized_tool.get("name"):
             normalized_tool["name"] = tool_type
         normalized_tool["name"] = _require_named_tool(tool_type, normalized_tool.get("name") or normalized_tool.get("function", {}).get("name", ""))
@@ -1063,7 +1064,7 @@ def _effective_response_tools(body):
 def _response_completion_from_stop_reason(stop_reason):
     if stop_reason in RESPONSE_COMPLETED_STOP_REASONS:
         return "completed", None
-    return "incomplete", RESPONSE_INCOMPLETE_STOP_REASONS.get(stop_reason, {"reason": "other"})
+    return "incomplete", RESPONSE_INCOMPLETE_STOP_REASONS.get(stop_reason)
 
 
 def _tool_stream_event_spec(call, response_context=None):
@@ -1534,6 +1535,9 @@ def translate_responses_request(body):
                 name = "shell"
             if not name:
                 raise UnsupportedFeatureError("Unsupported Responses API feature: tool call name is required")
+            call_id = item.get("call_id")
+            if not isinstance(call_id, str) or not call_id:
+                raise UnsupportedFeatureError("Unsupported Responses API feature: tool call call_id is required")
             flush_tool_results()
             if current_assistant_blocks and not _assistant_blocks_have_open_tool_use(current_assistant_blocks):
                 flush_assistant()
@@ -1558,7 +1562,7 @@ def translate_responses_request(body):
             current_assistant_blocks.append(
                 {
                     "type": "tool_use",
-                    "id": item.get("call_id", f"call_{uuid.uuid4().hex[:8]}"),
+                    "id": call_id,
                     "name": name,
                     "input": tool_input,
                 }

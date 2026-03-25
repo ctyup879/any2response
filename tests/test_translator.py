@@ -165,30 +165,23 @@ def test_translate_responses_request_rejects_lark_custom_tool_format():
         )
 
 
-def test_translate_responses_request_skips_nameless_hosted_tools():
-    request_body = {
-        "model": "codex-MiniMax-M2.7",
-        "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
-        "tools": [
-            {"type": "web_search"},
+def test_translate_responses_request_rejects_nameless_hosted_tools():
+    with pytest.raises(UnsupportedFeatureError, match="tool type"):
+        translate_responses_request(
             {
-                "type": "function",
-                "name": "echo",
-                "description": "Echo input",
-                "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
-            },
-        ],
-    }
-
-    translated = translate_responses_request(request_body)
-
-    assert translated["tools"] == [
-        {
-            "name": "echo",
-            "description": "Echo input",
-            "input_schema": {"type": "object", "properties": {"text": {"type": "string"}}},
-        }
-    ]
+                "model": "codex-MiniMax-M2.7",
+                "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hello"}]}],
+                "tools": [
+                    {"type": "web_search"},
+                    {
+                        "type": "function",
+                        "name": "echo",
+                        "description": "Echo input",
+                        "parameters": {"type": "object", "properties": {"text": {"type": "string"}}},
+                    },
+                ],
+            }
+        )
 
 
 def test_translate_responses_request_rejects_function_tool_without_name():
@@ -1356,6 +1349,22 @@ def test_translate_anthropic_response_marks_max_tokens_stop_as_incomplete():
     assert translated["output"][0]["status"] == "incomplete"
 
 
+@pytest.mark.parametrize("stop_reason", ["pause_turn", "model_context_window_exceeded"])
+def test_translate_anthropic_response_omits_nonstandard_incomplete_reason_values(stop_reason):
+    translated = translate_anthropic_response(
+        {
+            "id": "msg_incomplete_other",
+            "content": [{"type": "text", "text": "Partial"}],
+            "stop_reason": stop_reason,
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        },
+        "codex-MiniMax-M2.7",
+    )
+
+    assert translated["status"] == "incomplete"
+    assert translated["incomplete_details"] in (None, {})
+
+
 def test_translate_anthropic_response_omits_reasoning_encrypted_content_even_if_requested():
     body = {
         "id": "msg_reasoning",
@@ -1519,6 +1528,73 @@ def test_translate_responses_request_rejects_reasoning_encrypted_content_include
                 "include": ["reasoning.encrypted_content"],
                 "prompt_cache_key": "cache-key-123",
                 "parallel_tool_calls": False,
+            }
+        )
+
+
+@pytest.mark.parametrize("item_type", ["function_call", "custom_tool_call", "apply_patch_call", "shell_call"])
+def test_translate_responses_request_rejects_tool_calls_without_call_id(item_type):
+    item = {"type": item_type}
+    if item_type == "function_call":
+        item.update({"name": "echo", "arguments": "{}"})
+    elif item_type == "custom_tool_call":
+        item.update({"name": "apply_patch", "input": "*** Begin Patch\n*** End Patch\n"})
+    elif item_type == "apply_patch_call":
+        item.update({"operation": {"patch": "*** Begin Patch\n*** End Patch\n"}})
+    else:
+        item.update({"action": {"commands": ["pwd"]}})
+
+    with pytest.raises(UnsupportedFeatureError, match="call_id"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [item],
+            }
+        )
+
+
+@pytest.mark.parametrize(
+    "content_item",
+    [
+        {"type": "input_text"},
+        {"type": "input_text", "text": 123},
+        {"type": "text", "text": None},
+        {"type": "output_text", "text": False},
+    ],
+)
+def test_translate_responses_request_rejects_non_string_text_blocks(content_item):
+    with pytest.raises(UnsupportedFeatureError, match="text content"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [content_item],
+                    }
+                ],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_unsupported_tool_type_even_without_name():
+    with pytest.raises(UnsupportedFeatureError, match="tool type"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "tools": [{"type": "web_search"}],
+            }
+        )
+
+
+def test_build_response_context_rejects_unsupported_tool_type_even_without_name():
+    with pytest.raises(UnsupportedFeatureError, match="tool type"):
+        build_response_context(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "tools": [{"type": "web_search"}],
             }
         )
 

@@ -879,6 +879,41 @@ def test_translate_anthropic_stream_marks_max_tokens_stop_as_incomplete():
     assert completed["data"]["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
 
 
+@pytest.mark.parametrize("stop_reason", ["pause_turn", "model_context_window_exceeded"])
+def test_translate_anthropic_stream_omits_nonstandard_incomplete_reason_values(stop_reason):
+    translator = ResponsesEventTranslator()
+    events = []
+
+    anthropic_events = [
+        {"type": "message_start", "message": {"id": "msg_123"}},
+        {
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "text", "text": ""},
+        },
+        {
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "text_delta", "text": "Partial"},
+        },
+        {"type": "content_block_stop", "index": 0},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": stop_reason},
+            "usage": {"input_tokens": 3, "output_tokens": 2},
+        },
+        {"type": "message_stop"},
+    ]
+
+    for item in anthropic_events:
+        events.extend(translator.feed(item))
+
+    completed = next(event for event in events if event["event"] == "response.completed")
+
+    assert completed["data"]["response"]["status"] == "incomplete"
+    assert completed["data"]["response"]["incomplete_details"] in (None, {})
+
+
 def test_translate_anthropic_reasoning_done_item_includes_reasoning_text_content():
     translator = ResponsesEventTranslator()
     events = []
