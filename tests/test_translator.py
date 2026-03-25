@@ -2085,6 +2085,7 @@ def test_translate_responses_request_rejects_allowed_tools_with_unknown_tool_nam
         ("metadata", [], "metadata"),
         ("metadata", {1: "bad"}, "metadata"),
         ("user", 123, "user"),
+        ("stream", "true", "stream"),
     ],
 )
 def test_translate_responses_request_rejects_invalid_request_field_shapes(field_name, field_value, message):
@@ -2114,6 +2115,48 @@ def test_translate_responses_request_rejects_invalid_stop_shapes(stop_value):
                 "model": "codex-MiniMax-M2.7",
                 "input": "hello",
                 "stop": stop_value,
+            }
+        )
+
+
+def test_translate_responses_request_rejects_non_string_instructions():
+    with pytest.raises(UnsupportedFeatureError, match="instructions"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "instructions": {"policy": "be safe"},
+            }
+        )
+
+
+def test_translate_responses_request_rejects_non_object_tool_entries():
+    with pytest.raises(UnsupportedFeatureError, match="tools"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": "hello",
+                "tools": ["echo"],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_non_object_input_items():
+    with pytest.raises(UnsupportedFeatureError, match="input items"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "hi"}]}, 123],
+            }
+        )
+
+
+def test_translate_responses_request_rejects_scalar_input_values():
+    with pytest.raises(UnsupportedFeatureError, match="input is not supported"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": 123,
             }
         )
 

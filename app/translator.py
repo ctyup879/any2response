@@ -187,6 +187,22 @@ def _normalize_user(value):
     return value
 
 
+def _normalize_stream(value):
+    if value is None:
+        return True
+    if not isinstance(value, bool):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: stream is not supported")
+    return value
+
+
+def _normalize_instructions(value):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: instructions is not supported")
+    return value
+
+
 def _validate_request_scalar_fields(body):
     _normalize_max_output_tokens(body.get("max_output_tokens"))
     _normalize_temperature(body.get("temperature"))
@@ -195,6 +211,8 @@ def _validate_request_scalar_fields(body):
     _normalize_parallel_tool_calls(body.get("parallel_tool_calls"))
     _normalize_metadata(body.get("metadata"))
     _normalize_user(body.get("user"))
+    _normalize_stream(body.get("stream"))
+    _normalize_instructions(body.get("instructions"))
 
 
 def _builtin_tool_input_schema(tool_type, environment=None):
@@ -485,10 +503,12 @@ def _normalize_function_parameters(tool):
 
 
 def _translate_tools(tools):
+    if tools is not None and not isinstance(tools, list):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
     translated = []
     for tool in tools or []:
         if not isinstance(tool, dict):
-            continue
+            raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
         tool_type = tool.get("type")
         tool_name = tool.get("name") or tool.get("function", {}).get("name", "")
         if tool_type in {"apply_patch", "shell"} and not tool_name:
@@ -898,11 +918,12 @@ def _reasoning_input_text(item):
 
 
 def _normalize_response_tools(tools):
+    if tools is not None and not isinstance(tools, list):
+        raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
     normalized = []
     for tool in tools or []:
         if not isinstance(tool, dict):
-            normalized.append(tool)
-            continue
+            raise UnsupportedFeatureError("Unsupported Responses API feature: tools is not supported")
         normalized_tool = dict(tool)
         tool_type = normalized_tool.get("type")
         if tool_type in {"apply_patch", "shell"} and not normalized_tool.get("name"):
@@ -1037,6 +1058,8 @@ def _builtin_tool_output_is_error(item):
 
 
 def build_response_context(body, model=None):
+    stream = _normalize_stream(body.get("stream"))
+    instructions = _normalize_instructions(body.get("instructions"))
     text_config = body.get("text")
     if not isinstance(text_config, dict):
         response_format = body.get("response_format")
@@ -1050,7 +1073,7 @@ def build_response_context(body, model=None):
 
     return {
         "model": model or body.get("model"),
-        "instructions": body.get("instructions"),
+        "instructions": instructions,
         "max_output_tokens": _normalize_max_output_tokens(body.get("max_output_tokens")),
         "metadata": _normalize_metadata(body.get("metadata")),
         "user": _normalize_user(body.get("user")),
@@ -1069,7 +1092,7 @@ def build_response_context(body, model=None):
         "include": _normalize_include(body.get("include")),
         "prompt_cache_key": body.get("prompt_cache_key"),
         "top_logprobs": _normalize_top_logprobs(body.get("top_logprobs")),
-        "stream_options": _normalize_stream_options(body.get("stream_options"), body.get("stream", True)),
+        "stream_options": _normalize_stream_options(body.get("stream_options"), stream),
     }
 
 
@@ -1258,12 +1281,14 @@ def _iter_input_items(raw_input):
         return [raw_input]
     if isinstance(raw_input, list):
         return raw_input
-    return [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": _stringify(raw_input)}]}]
+    raise UnsupportedFeatureError("Unsupported Responses API feature: input is not supported")
 
 
 def translate_responses_request(body):
     _validate_supported_request_fields(body)
     _validate_request_scalar_fields(body)
+    stream = _normalize_stream(body.get("stream"))
+    instructions = _normalize_instructions(body.get("instructions"))
     if body.get("background"):
         raise UnsupportedFeatureError("background mode is not supported")
     if body.get("previous_response_id"):
@@ -1276,13 +1301,13 @@ def translate_responses_request(body):
     if body.get("max_tool_calls") is not None:
         raise UnsupportedFeatureError("Unsupported Responses API feature: max_tool_calls is not supported")
     _normalize_include(body.get("include"))
-    _normalize_stream_options(body.get("stream_options"), body.get("stream", True))
+    _normalize_stream_options(body.get("stream_options"), stream)
     _normalize_top_logprobs(body.get("top_logprobs"))
 
     result = {
         "model": body.get("model"),
         "messages": [],
-        "stream": body.get("stream", True),
+        "stream": stream,
     }
     max_output_tokens = _normalize_max_output_tokens(body.get("max_output_tokens"))
     if max_output_tokens is not None:
@@ -1302,8 +1327,8 @@ def translate_responses_request(body):
         result["thinking"] = thinking
 
     system_segments = []
-    if body.get("instructions"):
-        system_segments.append(body["instructions"])
+    if instructions:
+        system_segments.append(instructions)
     text_format_instruction = _text_format_instruction(body)
     if text_format_instruction:
         system_segments.append(text_format_instruction)
@@ -1388,7 +1413,7 @@ def translate_responses_request(body):
 
     for item in _iter_input_items(body.get("input", [])):
         if not isinstance(item, dict):
-            continue
+            raise UnsupportedFeatureError("Unsupported Responses API feature: input items are not supported")
 
         item_type = item.get("type") or ("message" if item.get("role") else None)
         if item_type == "message":

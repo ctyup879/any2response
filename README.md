@@ -157,3 +157,5 @@ Compatibility notes:
 - unsupported multimodal content inside tool outputs is rejected explicitly instead of being stringified.
 - orphan `tool_result` blocks are rejected explicitly instead of being silently filtered out.
 - malformed `tool_choice.allowed_tools` entries, unknown allowed tool names, and invalid scalar request controls are rejected locally before upstream dispatch.
+- invalid `stream` / `instructions` shapes are rejected locally instead of falling through to runtime type errors.
+- non-object `tools` entries and non-object `input` items are rejected explicitly instead of being silently ignored or coerced.
