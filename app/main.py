@@ -84,17 +84,21 @@ def _chat_request_to_responses_request(body):
             raise UnsupportedFeatureError("Unsupported Chat Completions feature: messages is not supported")
         role = message.get("role")
         if role in {"user", "assistant", "system", "developer"}:
-            responses_input.append(
-                {
-                    "type": "message",
-                    "role": role,
-                    "content": _chat_content_to_responses_content(message.get("content", "")),
-                }
-            )
+            content_value = message.get("content", "")
+            tool_calls = message.get("tool_calls", []) if role == "assistant" else []
+            if tool_calls is None:
+                tool_calls = []
+            empty_assistant_content = content_value is None or content_value == "" or content_value == []
+            should_emit_message = not (role == "assistant" and tool_calls and empty_assistant_content)
+            if should_emit_message:
+                responses_input.append(
+                    {
+                        "type": "message",
+                        "role": role,
+                        "content": _chat_content_to_responses_content(content_value),
+                    }
+                )
             if role == "assistant":
-                tool_calls = message.get("tool_calls", [])
-                if tool_calls is None:
-                    tool_calls = []
                 if not isinstance(tool_calls, list):
                     raise UnsupportedFeatureError("Unsupported Chat Completions feature: tool_calls is not supported")
                 for tool_call in tool_calls:
@@ -153,6 +157,19 @@ def _chat_request_to_responses_request(body):
         translated["text"] = {"format": body["response_format"]}
     if "reasoning_effort" in body:
         translated["reasoning"] = {"effort": body["reasoning_effort"]}
+    logprobs = body.get("logprobs")
+    if logprobs is not None and not isinstance(logprobs, bool):
+        raise UnsupportedFeatureError("Unsupported Chat Completions feature: logprobs is not supported")
+    chat_top_logprobs = body.get("top_logprobs")
+    if chat_top_logprobs is not None:
+        if not isinstance(chat_top_logprobs, int) or chat_top_logprobs < 0:
+            raise UnsupportedFeatureError("Unsupported Chat Completions feature: top_logprobs is not supported")
+        if logprobs is not True:
+            raise UnsupportedFeatureError(
+                "Unsupported Chat Completions feature: top_logprobs requires logprobs=true"
+            )
+    if logprobs is True or chat_top_logprobs is not None:
+        raise UnsupportedFeatureError("Unsupported Chat Completions feature: logprobs is not supported")
     if "stream_options" in body:
         stream_options = body.get("stream_options")
         if not isinstance(stream_options, dict):
@@ -185,6 +202,8 @@ def _chat_request_to_responses_request(body):
         "response_format",
         "reasoning_effort",
         "stream_options",
+        "logprobs",
+        "top_logprobs",
     }
     for field_name in body:
         if field_name not in supported_fields:

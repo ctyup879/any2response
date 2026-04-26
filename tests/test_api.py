@@ -400,6 +400,100 @@ def test_post_chat_completions_translates_tool_messages_and_tool_calls():
     assert "tool_result" in content_types
 
 
+def test_post_chat_completions_omits_empty_assistant_message_when_only_tool_calls():
+    upstream = ToolCallUpstreamClient()
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=upstream,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": False,
+            "messages": [
+                {"role": "user", "content": "plan"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{\"q\":\"weather\"}"},
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assistant_text_blocks = [
+        block.get("text", "")
+        for message in upstream.last_payload["messages"]
+        if message.get("role") == "assistant"
+        for block in message.get("content", [])
+        if block.get("type") == "text"
+    ]
+    assert assistant_text_blocks == []
+
+
+def test_post_chat_completions_rejects_logprobs():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "messages": [{"role": "user", "content": "hello"}],
+            "logprobs": True,
+            "top_logprobs": 3,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "logprobs is not supported" in response.json()["error"]["message"]
+
+
+def test_post_chat_completions_rejects_top_logprobs_without_logprobs():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "messages": [{"role": "user", "content": "hello"}],
+            "top_logprobs": 1,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "requires logprobs=true" in response.json()["error"]["message"]
+
+
 def test_post_chat_completions_stream_text():
     app = create_app(
         {
