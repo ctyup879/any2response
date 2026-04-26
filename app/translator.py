@@ -35,7 +35,15 @@ IGNORABLE_UNNAMED_HOSTED_TOOL_TYPES = {
 
 SUPPORTED_RESPONSES_TOOL_TYPES = {None, "function", "custom", "apply_patch", "shell", "mcp", "web_search"}
 SUPPORTED_PROVIDER_PROFILES = {"minimax", "anthropic", "generic"}
-SUPPORTED_INCLUDE_VALUES = {"reasoning.encrypted_content", "web_search_call.action.sources"}
+SUPPORTED_INCLUDE_VALUES = {
+    "reasoning.encrypted_content",
+    "web_search_call.action.sources",
+    "file_search_call.results",
+    "computer_call_output.output.image_url",
+    "message.output_text.logprobs",
+    "message.input_image.image_url",
+    "code_interpreter_call.outputs",
+}
 REASONING_BRIDGE_PREFIX = "a2r_reasoning_v1:"
 
 

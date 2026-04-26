@@ -2086,15 +2086,26 @@ def test_translate_responses_request_rejects_unsupported_official_fields(field_n
         translate_responses_request(body)
 
 
-def test_translate_responses_request_rejects_unsupported_logprobs_include():
-    with pytest.raises(UnsupportedFeatureError, match="include"):
-        translate_responses_request(
-            {
-                "model": "codex-MiniMax-M2.7",
-                "input": "hello",
-                "include": ["message.output_text.logprobs"],
-            }
-        )
+@pytest.mark.parametrize(
+    "include_value",
+    [
+        "message.output_text.logprobs",
+        "file_search_call.results",
+        "computer_call_output.output.image_url",
+        "message.input_image.image_url",
+        "code_interpreter_call.outputs",
+    ],
+)
+def test_translate_responses_request_accepts_official_include_values(include_value):
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "include": [include_value],
+        }
+    )
+
+    assert translated["model"] == "codex-MiniMax-M2.7"
 
 
 def test_translate_anthropic_response_omits_logprobs_when_not_requested():
