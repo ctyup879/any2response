@@ -133,6 +133,8 @@ def _chat_request_to_responses_request(body):
         raise UnsupportedFeatureError(f"Unsupported Chat Completions role: {role}")
 
     translated = {"model": body.get("model"), "input": responses_input, "stream": bool(body.get("stream", False))}
+    if body.get("n", 1) != 1:
+        raise UnsupportedFeatureError("Unsupported Chat Completions feature: n is not supported")
     passthrough_fields = [
         "tools",
         "tool_choice",
@@ -151,6 +153,42 @@ def _chat_request_to_responses_request(body):
         translated["text"] = {"format": body["response_format"]}
     if "reasoning_effort" in body:
         translated["reasoning"] = {"effort": body["reasoning_effort"]}
+    if "stream_options" in body:
+        stream_options = body.get("stream_options")
+        if not isinstance(stream_options, dict):
+            raise UnsupportedFeatureError("Unsupported Chat Completions feature: stream_options is not supported")
+        unknown_stream_options = set(stream_options) - {"include_usage", "include_obfuscation"}
+        if unknown_stream_options:
+            raise UnsupportedFeatureError("Unsupported Chat Completions feature: stream_options is not supported")
+        if "include_usage" in stream_options and not isinstance(stream_options["include_usage"], bool):
+            raise UnsupportedFeatureError("Unsupported Chat Completions feature: stream_options.include_usage is not supported")
+        if "include_obfuscation" in stream_options:
+            if not isinstance(stream_options["include_obfuscation"], bool):
+                raise UnsupportedFeatureError(
+                    "Unsupported Chat Completions feature: stream_options.include_obfuscation is not supported"
+                )
+            translated["stream_options"] = {"include_obfuscation": stream_options["include_obfuscation"]}
+    supported_fields = {
+        "model",
+        "messages",
+        "stream",
+        "n",
+        "tools",
+        "tool_choice",
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "stop",
+        "parallel_tool_calls",
+        "metadata",
+        "user",
+        "response_format",
+        "reasoning_effort",
+        "stream_options",
+    }
+    for field_name in body:
+        if field_name not in supported_fields:
+            raise UnsupportedFeatureError(f"Unsupported Chat Completions feature: {field_name} is not supported")
     return translated
 
 
@@ -337,6 +375,7 @@ def create_app(settings_override=None, upstream_client=None):
                 next_tool_index = 0
                 saw_tool_call = False
                 final_finish_reason = "stop"
+                final_usage = None
                 try:
                     async for upstream_event in client.stream_messages(translated):
                         for translated_event in translator.feed(upstream_event):
@@ -351,6 +390,11 @@ def create_app(settings_override=None, upstream_client=None):
                                     output_index = payload.get("output_index")
                                     tool_index_by_output[output_index] = next_tool_index
                                     chunk = _chat_stream_chunk_base(response_id or "stream", translated.get("model"))
+                                    if not role_emitted:
+                                        chunk["choices"] = [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]
+                                        role_emitted = True
+                                        yield _chat_chunk_sse(chunk)
+                                        chunk = _chat_stream_chunk_base(response_id or "stream", translated.get("model"))
                                     chunk["choices"] = [
                                         {
                                             "index": 0,
@@ -398,6 +442,7 @@ def create_app(settings_override=None, upstream_client=None):
                                 yield _chat_chunk_sse(chunk)
                             elif event_name == "response.completed":
                                 response_payload = payload.get("response", {})
+                                final_usage = response_payload.get("usage")
                                 if response_payload.get("status") == "incomplete":
                                     final_finish_reason = "length"
                                 elif saw_tool_call:
@@ -408,13 +453,28 @@ def create_app(settings_override=None, upstream_client=None):
                             response_id = payload.get("response", {}).get("id")
                         if translated_event.get("event") == "response.completed":
                             response_payload = payload.get("response", {})
+                            final_usage = response_payload.get("usage")
                             if response_payload.get("status") == "incomplete":
                                 final_finish_reason = "length"
                             elif saw_tool_call:
                                 final_finish_reason = "tool_calls"
+                    if not role_emitted:
+                        role_chunk = _chat_stream_chunk_base(response_id or "stream", translated.get("model"))
+                        role_chunk["choices"] = [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}]
+                        yield _chat_chunk_sse(role_chunk)
                     final_chunk = _chat_stream_chunk_base(response_id or "stream", translated.get("model"))
                     final_chunk["choices"] = [{"index": 0, "delta": {}, "finish_reason": final_finish_reason}]
                     yield _chat_chunk_sse(final_chunk)
+                    stream_options = body.get("stream_options") or {}
+                    if stream_options.get("include_usage") and final_usage is not None:
+                        usage_chunk = _chat_stream_chunk_base(response_id or "stream", translated.get("model"))
+                        usage_chunk["choices"] = []
+                        usage_chunk["usage"] = {
+                            "prompt_tokens": final_usage.get("input_tokens", 0),
+                            "completion_tokens": final_usage.get("output_tokens", 0),
+                            "total_tokens": final_usage.get("total_tokens", 0),
+                        }
+                        yield _chat_chunk_sse(usage_chunk)
                     yield "data: [DONE]\n\n"
                 except UpstreamHTTPError as exc:
                     error_chunk = {"error": {"message": str(exc.message), "type": "upstream_error"}}

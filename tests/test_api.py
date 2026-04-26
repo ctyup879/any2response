@@ -459,9 +459,84 @@ def test_post_chat_completions_stream_tool_calls():
     )
 
     assert response.status_code == 200
+    assert '"delta":{"role":"assistant"}' in response.text
     assert '"tool_calls":[{"index":0,"id":"call_123","type":"function"' in response.text
     assert '"arguments":"{\\"q\\":\\"weather\\"}"' in response.text
     assert '"finish_reason":"tool_calls"' in response.text
+
+
+def test_post_chat_completions_stream_can_include_usage_chunk():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert '"choices":[]' in response.text
+    assert '"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}' in response.text
+
+
+def test_post_chat_completions_rejects_unsupported_n():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "messages": [{"role": "user", "content": "hello"}],
+            "n": 2,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "n is not supported" in response.json()["error"]["message"]
+
+
+def test_post_chat_completions_rejects_unknown_field():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "messages": [{"role": "user", "content": "hello"}],
+            "presence_penalty": 0.1,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "presence_penalty" in response.json()["error"]["message"]
 
 
 def test_post_responses_rejects_zero_top_logprobs():
