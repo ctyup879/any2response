@@ -10,9 +10,11 @@ from app.service_unit import (
     render_service_unit,
 )
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 
 def test_render_service_unit_contains_expected_fields():
-    project_root = Path("/root/minimaxdemo")
+    project_root = PROJECT_ROOT
 
     rendered = render_service_unit(project_root)
 
@@ -33,7 +35,7 @@ def test_default_unit_path_uses_systemd_user_directory():
 
 
 def test_install_unit_file_writes_rendered_content(tmp_path):
-    project_root = Path("/root/minimaxdemo")
+    project_root = PROJECT_ROOT
     home = tmp_path / "home"
     home.mkdir()
 
@@ -53,7 +55,7 @@ def test_install_script_writes_unit_file(tmp_path):
 
     result = subprocess.run(
         [sys.executable, "scripts/install_user_service.py"],
-        cwd="/root/minimaxdemo",
+        cwd=PROJECT_ROOT,
         env=env,
         capture_output=True,
         text=True,

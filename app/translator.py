@@ -2436,11 +2436,14 @@ def translate_responses_request(body, provider_profile="minimax"):
                 "content": content,
             }
             output_status = item.get("status")
-            if item_type not in {"apply_patch_call_output", "shell_call_output"} and output_status not in {None, "completed", "failed"}:
+            if (
+                item_type not in {"apply_patch_call_output", "shell_call_output"}
+                and output_status not in {None, "in_progress", "completed", "incomplete"}
+            ):
                 raise UnsupportedFeatureError("Unsupported Responses API feature: tool call output status is not supported")
             if (
                 item_type in {"apply_patch_call_output", "shell_call_output"} and _builtin_tool_output_is_error(item)
-            ) or output_status == "failed" or item.get("is_error") is True:
+            ) or item.get("is_error") is True:
                 tool_result["is_error"] = True
             pending_tool_result_blocks.append(tool_result)
             continue

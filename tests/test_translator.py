@@ -811,6 +811,59 @@ def test_translate_responses_request_groups_consecutive_tool_results():
     ]
 
 
+@pytest.mark.parametrize("status", ["in_progress", "completed", "incomplete"])
+def test_translate_responses_request_accepts_function_call_output_status_values(status):
+    request_body = {
+        "model": "codex-MiniMax-M2.7",
+        "input": [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "tool_a",
+                "arguments": {"x": 1},
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "status": status,
+                "output": "{\"ok\":true}",
+            },
+        ],
+    }
+
+    translated = translate_responses_request(request_body)
+
+    assert translated["messages"][1]["content"][0] == {
+        "type": "tool_result",
+        "tool_use_id": "call_1",
+        "content": "{\"ok\":true}",
+    }
+
+
+@pytest.mark.parametrize("status", ["failed", "queued"])
+def test_translate_responses_request_rejects_unknown_function_call_output_status(status):
+    with pytest.raises(UnsupportedFeatureError, match="tool call output status"):
+        translate_responses_request(
+            {
+                "model": "codex-MiniMax-M2.7",
+                "input": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "tool_a",
+                        "arguments": {"x": 1},
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "status": status,
+                        "output": "{\"ok\":true}",
+                    },
+                ],
+            }
+        )
+
+
 def test_translate_responses_request_accepts_custom_tool_call_output_items():
     request_body = {
         "model": "codex-MiniMax-M2.7",
