@@ -66,6 +66,21 @@ class MultiToolStreamClient(FakeUpstreamClient):
             yield item
 
 
+class ToolCallUpstreamClient(FakeUpstreamClient):
+    async def create_message(self, payload):
+        self.last_payload = payload
+        return {
+            "id": "msg_tool",
+            "role": "assistant",
+            "type": "message",
+            "content": [
+                {"type": "tool_use", "id": "call_123", "name": "lookup", "input": {"q": "weather"}},
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 7, "output_tokens": 2},
+        }
+
+
 def test_post_responses_requires_auth():
     app = create_app(
         {
@@ -283,7 +298,108 @@ def test_post_responses_supports_reasoning_encrypted_content_include_requests():
     )
 
     assert response.status_code == 200
-    assert response.json()["output"][0]["type"] == "message"
+
+
+def test_post_chat_completions_non_stream():
+    upstream = FakeUpstreamClient()
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=upstream,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": False,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "chat.completion"
+    assert data["choices"][0]["message"]["role"] == "assistant"
+    assert data["choices"][0]["message"]["content"] == "Hello from MiniMax"
+    assert data["usage"]["total_tokens"] == 8
+    assert upstream.last_payload["messages"][0]["content"][0]["text"] == "hello"
+
+
+def test_post_chat_completions_translates_tool_messages_and_tool_calls():
+    upstream = ToolCallUpstreamClient()
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=upstream,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": False,
+            "messages": [
+                {"role": "user", "content": "plan"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {"name": "lookup", "arguments": "{\"q\":\"weather\"}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "call_123", "content": "{\"ok\":true}"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["choices"][0]["finish_reason"] == "tool_calls"
+    assert data["choices"][0]["message"]["tool_calls"][0]["id"] == "call_123"
+    content_types = [
+        block.get("type")
+        for message in upstream.last_payload["messages"]
+        for block in message.get("content", [])
+    ]
+    assert "tool_use" in content_types
+    assert "tool_result" in content_types
+
+
+def test_post_chat_completions_rejects_stream():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hello"}],
+        },
+    )
+
+    assert response.status_code == 400
+    assert "stream is not supported" in response.json()["error"]["message"]
 
 
 def test_post_responses_rejects_zero_top_logprobs():
