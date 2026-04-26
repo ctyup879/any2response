@@ -1996,7 +1996,11 @@ def _text_format_instruction(body):
         schema = format_spec.get("schema") or format_spec.get("json_schema", {}).get("schema")
         if schema:
             schema_json = json.dumps(schema, ensure_ascii=False, indent=2)
-            strict = format_spec.get("strict", True)
+            strict = format_spec.get("strict")
+            if strict is None and isinstance(format_spec.get("json_schema"), dict):
+                strict = format_spec["json_schema"].get("strict")
+            if strict is None:
+                strict = True
             if strict not in (True, False, None):
                 raise UnsupportedFeatureError("Unsupported Responses API feature: text.format.strict is not supported")
             if strict is False:

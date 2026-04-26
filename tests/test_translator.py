@@ -3839,6 +3839,26 @@ def test_translate_responses_request_respects_non_strict_json_schema_format():
     assert "matches this JSON schema as closely as possible" in translated["system"]
 
 
+def test_translate_responses_request_respects_nested_non_strict_json_schema_format():
+    translated = translate_responses_request(
+        {
+            "model": "codex-MiniMax-M2.7",
+            "input": "hello",
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "weather",
+                    "strict": False,
+                    "schema": {"type": "object", "properties": {"city": {"type": "string"}}},
+                },
+            },
+        }
+    )
+
+    assert "strictly follows this JSON schema" not in translated["system"]
+    assert "matches this JSON schema as closely as possible" in translated["system"]
+
+
 def test_translate_responses_request_accepts_function_tool_strict_false():
     translated = translate_responses_request(
         {
