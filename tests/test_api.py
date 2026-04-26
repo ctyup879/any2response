@@ -633,6 +633,56 @@ def test_post_chat_completions_rejects_unknown_field():
     assert "presence_penalty" in response.json()["error"]["message"]
 
 
+def test_post_chat_completions_supports_max_completion_tokens_alias():
+    upstream = FakeUpstreamClient()
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=upstream,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_completion_tokens": 128,
+        },
+    )
+
+    assert response.status_code == 200
+    assert upstream.last_payload["max_tokens"] == 128
+
+
+def test_post_chat_completions_rejects_conflicting_max_token_fields():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=FakeUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "messages": [{"role": "user", "content": "hello"}],
+            "max_tokens": 64,
+            "max_completion_tokens": 128,
+        },
+    )
+
+    assert response.status_code == 400
+    assert "max_tokens and max_completion_tokens conflict" in response.json()["error"]["message"]
+
+
 def test_post_responses_rejects_zero_top_logprobs():
     app = create_app(
         {

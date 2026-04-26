@@ -150,7 +150,17 @@ def _chat_request_to_responses_request(body):
         "metadata",
         "user",
     ]
+    max_completion_tokens = body.get("max_completion_tokens")
+    max_tokens = body.get("max_tokens")
+    if max_completion_tokens is not None and max_tokens is not None and max_completion_tokens != max_tokens:
+        raise UnsupportedFeatureError(
+            "Unsupported Chat Completions feature: max_tokens and max_completion_tokens conflict"
+        )
+    if max_completion_tokens is not None:
+        translated["max_output_tokens"] = max_completion_tokens
     for field in passthrough_fields:
+        if field == "max_tokens" and max_completion_tokens is not None:
+            continue
         if field in body:
             translated[field if field != "max_tokens" else "max_output_tokens"] = body[field]
     if "response_format" in body:
@@ -195,6 +205,7 @@ def _chat_request_to_responses_request(body):
         "temperature",
         "top_p",
         "max_tokens",
+        "max_completion_tokens",
         "stop",
         "parallel_tool_calls",
         "metadata",
