@@ -206,6 +206,19 @@ def _responses_to_chat_completion(response):
     }
 
 
+def _chat_chunk_sse(chunk):
+    return f"data: {json.dumps(chunk, ensure_ascii=False, separators=(',', ':'))}\n\n"
+
+
+def _chat_stream_chunk_base(response_id, model):
+    return {
+        "id": f"chatcmpl_{response_id}",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+    }
+
+
 def create_app(settings_override=None, upstream_client=None):
     settings = load_settings(settings_override)
     client = upstream_client or MiniMaxClient(settings)
@@ -313,7 +326,114 @@ def create_app(settings_override=None, upstream_client=None):
             return _error_response(400, str(exc), "unsupported_feature")
 
         if translated.get("stream", False):
-            return _error_response(400, "Unsupported Chat Completions feature: stream is not supported", "unsupported_feature")
+            async def chat_event_stream():
+                translator = ResponsesEventTranslator(
+                    model=translated.get("model"),
+                    response_context=response_context,
+                )
+                role_emitted = False
+                response_id = None
+                tool_index_by_output = {}
+                next_tool_index = 0
+                saw_tool_call = False
+                final_finish_reason = "stop"
+                try:
+                    async for upstream_event in client.stream_messages(translated):
+                        for translated_event in translator.feed(upstream_event):
+                            event_name = translated_event.get("event")
+                            payload = translated_event.get("data", {})
+                            if response_id is None:
+                                response_id = payload.get("response", {}).get("id")
+                            if event_name == "response.output_item.added":
+                                item = payload.get("item", {})
+                                if item.get("type") == "function_call":
+                                    saw_tool_call = True
+                                    output_index = payload.get("output_index")
+                                    tool_index_by_output[output_index] = next_tool_index
+                                    chunk = _chat_stream_chunk_base(response_id or "stream", translated.get("model"))
+                                    chunk["choices"] = [
+                                        {
+                                            "index": 0,
+                                            "delta": {
+                                                "tool_calls": [
+                                                    {
+                                                        "index": next_tool_index,
+                                                        "id": item.get("call_id"),
+                                                        "type": "function",
+                                                        "function": {"name": item.get("name"), "arguments": ""},
+                                                    }
+                                                ]
+                                            },
+                                            "finish_reason": None,
+                                        }
+                                    ]
+                                    next_tool_index += 1
+                                    yield _chat_chunk_sse(chunk)
+                            elif event_name == "response.function_call_arguments.delta":
+                                output_index = payload.get("output_index")
+                                if output_index in tool_index_by_output:
+                                    chunk = _chat_stream_chunk_base(response_id or "stream", translated.get("model"))
+                                    chunk["choices"] = [
+                                        {
+                                            "index": 0,
+                                            "delta": {
+                                                "tool_calls": [
+                                                    {
+                                                        "index": tool_index_by_output[output_index],
+                                                        "function": {"arguments": payload.get("delta", "")},
+                                                    }
+                                                ]
+                                            },
+                                            "finish_reason": None,
+                                        }
+                                    ]
+                                    yield _chat_chunk_sse(chunk)
+                            elif event_name == "response.output_text.delta":
+                                chunk = _chat_stream_chunk_base(response_id or "stream", translated.get("model"))
+                                delta_payload = {"content": payload.get("delta", "")}
+                                if not role_emitted:
+                                    delta_payload["role"] = "assistant"
+                                    role_emitted = True
+                                chunk["choices"] = [{"index": 0, "delta": delta_payload, "finish_reason": None}]
+                                yield _chat_chunk_sse(chunk)
+                            elif event_name == "response.completed":
+                                response_payload = payload.get("response", {})
+                                if response_payload.get("status") == "incomplete":
+                                    final_finish_reason = "length"
+                                elif saw_tool_call:
+                                    final_finish_reason = "tool_calls"
+                    for translated_event in translator.finish():
+                        payload = translated_event.get("data", {})
+                        if response_id is None:
+                            response_id = payload.get("response", {}).get("id")
+                        if translated_event.get("event") == "response.completed":
+                            response_payload = payload.get("response", {})
+                            if response_payload.get("status") == "incomplete":
+                                final_finish_reason = "length"
+                            elif saw_tool_call:
+                                final_finish_reason = "tool_calls"
+                    final_chunk = _chat_stream_chunk_base(response_id or "stream", translated.get("model"))
+                    final_chunk["choices"] = [{"index": 0, "delta": {}, "finish_reason": final_finish_reason}]
+                    yield _chat_chunk_sse(final_chunk)
+                    yield "data: [DONE]\n\n"
+                except UpstreamHTTPError as exc:
+                    error_chunk = {"error": {"message": str(exc.message), "type": "upstream_error"}}
+                    yield _chat_chunk_sse(error_chunk)
+                    yield "data: [DONE]\n\n"
+                except UnsupportedFeatureError as exc:
+                    error_chunk = {"error": {"message": str(exc), "type": "unsupported_feature"}}
+                    yield _chat_chunk_sse(error_chunk)
+                    yield "data: [DONE]\n\n"
+
+            return StreamingResponse(
+                chat_event_stream(),
+                media_type=None,
+                headers={
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                },
+            )
 
         try:
             upstream_body = await client.create_message(translated)

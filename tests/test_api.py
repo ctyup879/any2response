@@ -81,6 +81,28 @@ class ToolCallUpstreamClient(FakeUpstreamClient):
         }
 
 
+class ToolCallStreamUpstreamClient(FakeUpstreamClient):
+    async def stream_messages(self, payload):
+        self.last_payload = payload
+        for item in [
+            {"type": "message_start", "message": {"id": "msg_stream_tool"}},
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {"type": "tool_use", "id": "call_123", "name": "lookup", "input": {}},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "input_json_delta", "partial_json": "{\"q\":\"weather\"}"},
+            },
+            {"type": "content_block_stop", "index": 0},
+            {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"input_tokens": 3, "output_tokens": 1}},
+            {"type": "message_stop"},
+        ]:
+            yield item
+
+
 def test_post_responses_requires_auth():
     app = create_app(
         {
@@ -378,7 +400,7 @@ def test_post_chat_completions_translates_tool_messages_and_tool_calls():
     assert "tool_result" in content_types
 
 
-def test_post_chat_completions_rejects_stream():
+def test_post_chat_completions_stream_text():
     app = create_app(
         {
             "proxy_api_key": "proxy-secret",
@@ -398,8 +420,48 @@ def test_post_chat_completions_rejects_stream():
         },
     )
 
-    assert response.status_code == 400
-    assert "stream is not supported" in response.json()["error"]["message"]
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert '"object":"chat.completion.chunk"' in response.text
+    assert '"role":"assistant"' in response.text
+    assert "Hello from stream" in response.text
+    assert '"finish_reason":"stop"' in response.text
+    assert "data: [DONE]" in response.text
+
+
+def test_post_chat_completions_stream_tool_calls():
+    app = create_app(
+        {
+            "proxy_api_key": "proxy-secret",
+            "minimax_api_key": "minimax-secret",
+        },
+        upstream_client=ToolCallStreamUpstreamClient(),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers={"Authorization": "Bearer proxy-secret"},
+        json={
+            "model": "codex-MiniMax-M2.7",
+            "stream": True,
+            "messages": [{"role": "user", "content": "hello"}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert '"tool_calls":[{"index":0,"id":"call_123","type":"function"' in response.text
+    assert '"arguments":"{\\"q\\":\\"weather\\"}"' in response.text
+    assert '"finish_reason":"tool_calls"' in response.text
 
 
 def test_post_responses_rejects_zero_top_logprobs():
